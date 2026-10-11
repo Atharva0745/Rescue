@@ -1,0 +1,291 @@
+{
+  "meta": {
+    "config_id": "RESCUE4-CFG-V1.0",
+    "specification_version": "v1.5",
+    "phase": "Phase 6 - Statistical Pre-Registration",
+    "status": "FROZEN_ALL_PARAMETERS",
+    "created_at": "2026-10-11T22:15:00Z",
+    "pre_registration_frozen_at": "2026-10-11T17:45:00Z"
+  },
+  "runtime": {
+    "simulator": {
+      "language": "python",
+      "runtime_version": ">=3.11",
+      "arithmetic_mode": "exact_rational",
+      "rational_implementation": "fractions.Fraction",
+      "prng_algorithm": "PCG64",
+      "time_quantum_seconds": "0.000001"
+    },
+    "database_testbed": {
+      "engine": "PostgreSQL",
+      "version": "16.3",
+      "logical_decoding_plugin": "test_decoding",
+      "decoding_options": {
+        "include_xids": true,
+        "include_timestamp": true,
+        "stream_changes": false
+      },
+      "wal_level": "logical",
+      "max_replication_slots": 10,
+      "max_wal_senders": 10,
+      "synchronous_commit": "on"
+    }
+  },
+  "assumptions": {
+    "A1_work_conserving": true,
+    "A2_identical_executors": true,
+    "A3_fifo_per_class": true,
+    "A4_primary_stability_no_failover": true,
+    "A5_non_byzantine_writers": true,
+    "A6_single_gateway_for_bounds": true,
+    "A7_bounded_stop_cancellation": true,
+    "A8_dispatch_overhead_accounting": true,
+    "A9_empirical_useful_completion_floors": true
+  },
+  "stages": [
+    {
+      "stage_id": "S1_INGEST",
+      "description": "Request ingress, validation, and preliminary payload normalization",
+      "K_s": 8,
+      "tau_s_seconds": 1.0,
+      "C_max_s": 8.0,
+      "dispatch_queue_discipline": "FIFO",
+      "quarantine_capacity_mode": "DEDUCTED_FROM_K_AVAIL"
+    },
+    {
+      "stage_id": "S2_PROCESS",
+      "description": "Core computational pipeline and state evaluation",
+      "K_s": 16,
+      "tau_s_seconds": 2.0,
+      "C_max_s": 32.0,
+      "dispatch_queue_discipline": "FIFO",
+      "quarantine_capacity_mode": "DEDUCTED_FROM_K_AVAIL"
+    },
+    {
+      "stage_id": "S3_PERSIST",
+      "description": "Fenced database transaction writes and audit record logging",
+      "K_s": 4,
+      "tau_s_seconds": 0.5,
+      "C_max_s": 2.0,
+      "dispatch_queue_discipline": "FIFO",
+      "quarantine_capacity_mode": "DEDUCTED_FROM_K_AVAIL"
+    }
+  ],
+  "request_classes": [
+    {
+      "class_id": "C_INTERACTIVE",
+      "description": "High-priority, low-latency client API calls",
+      "wall_clock_cap_seconds": 0.200,
+      "deadline_D_c_seconds": 0.500,
+      "stop_timeout_T_cancel_seconds": 0.050,
+      "dispatch_overhead_delta_seconds": 0.005,
+      "beta_cap_seconds": 0.255,
+      "reservation_weight": 0.255
+    },
+    {
+      "class_id": "C_BATCH",
+      "description": "Throughput-oriented background task batch jobs",
+      "wall_clock_cap_seconds": 1.000,
+      "deadline_D_c_seconds": 3.000,
+      "stop_timeout_T_cancel_seconds": 0.100,
+      "dispatch_overhead_delta_seconds": 0.010,
+      "beta_cap_seconds": 1.110,
+      "reservation_weight": 1.110
+    }
+  ],
+  "arms": {
+    "admission_policies": [
+      {
+        "id": "A_PRIME",
+        "name": "Adaptive Limiter",
+        "type": "CONGESTION_BASED_ADAPTIVE"
+      },
+      {
+        "id": "D",
+        "name": "DRACO-style Datastore-Aware",
+        "type": "DATASTORE_AWARE_DROPPING",
+        "provisional_label": "DRACO_PENDING_FIDELITY"
+      },
+      {
+        "id": "B",
+        "name": "RESCUE-4 Reservation Policy",
+        "type": "RESERVATION_LEDS"
+      }
+    ],
+    "enforcement_levels": [
+      {
+        "id": "NS",
+        "shared_semaphore": false,
+        "cgroup_budgets": false,
+        "release_policy": "RELEASE_AT_EXPIRY",
+        "owner_confirmed_release": false,
+        "executor_quarantine": false,
+        "database_fencing": false
+      },
+      {
+        "id": "TR",
+        "shared_semaphore": true,
+        "cgroup_budgets": true,
+        "release_policy": "RELEASE_AT_EXPIRY",
+        "owner_confirmed_release": false,
+        "executor_quarantine": false,
+        "database_fencing": false
+      },
+      {
+        "id": "OC",
+        "shared_semaphore": true,
+        "cgroup_budgets": true,
+        "release_policy": "AFTER_OWNER_CONFIRMATION",
+        "owner_confirmed_release": true,
+        "executor_quarantine": true,
+        "database_fencing": true
+      }
+    ]
+  },
+  "database_fencing": {
+    "schema": {
+      "fence_log_table": "fence_log",
+      "fence_log_columns": ["gw", "seq", "inc_new", "epoch_new", "created_at"],
+      "audit_table": "audit",
+      "audit_columns": ["write_id", "gw", "inc", "epoch", "tx_timestamp"],
+      "data_tables": ["account_ledger", "resource_registry"]
+    },
+    "protocol": {
+      "version_structure": "(inc, epoch)",
+      "version_comparison": "LEXICOGRAPHIC",
+      "incarnation_bump_rule": "(inc + 1, 0)",
+      "lock_mode": "FOR SHARE",
+      "disallow_mixed_transactions": true,
+      "require_one_to_one_audit": true
+    }
+  },
+  "workloads": {
+    "W1": {
+      "name": "Bottleneck Shift",
+      "description": "Dynamic shift of bottleneck between S1 and S2; used also at alpha=0 for no-attack guardrail",
+      "duration_seconds": 60.0,
+      "warmup_seconds": 10.0,
+      "measurement_window_seconds": 40.0,
+      "cooldown_seconds": 10.0,
+      "arrival_process": "POISSON_PIECEWISE",
+      "nominal_load_factor": 0.85,
+      "peak_load_factor": 1.40,
+      "shift_schedule": [
+        {"start_time": 0.0, "bottleneck_stage": "S1_INGEST", "rate_multiplier": 1.0},
+        {"start_time": 20.0, "bottleneck_stage": "S2_PROCESS", "rate_multiplier": 1.5},
+        {"start_time": 40.0, "bottleneck_stage": "S1_INGEST", "rate_multiplier": 1.0}
+      ]
+    },
+    "W2": {
+      "name": "Slow Completion and Cancellation Difficulty",
+      "description": "Exercises delayed completion, withheld acks, and hung executors under sustained load",
+      "duration_seconds": 60.0,
+      "warmup_seconds": 10.0,
+      "measurement_window_seconds": 40.0,
+      "cooldown_seconds": 10.0,
+      "arrival_process": "POISSON_STEADY",
+      "nominal_load_factor": 0.90,
+      "slow_completion_fraction": 0.15,
+      "slowdown_factor": 3.0,
+      "withheld_ack_fraction": 0.05
+    },
+    "W3": {
+      "name": "Combined Failure Workload",
+      "description": "Combines W1 bottleneck shift, W2 cancellation resistance, and simulated gateway crash",
+      "duration_seconds": 90.0,
+      "warmup_seconds": 15.0,
+      "measurement_window_seconds": 60.0,
+      "cooldown_seconds": 15.0,
+      "arrival_process": "POISSON_BURSTY",
+      "gateway_crash_event": {
+        "scheduled_time_seconds": 35.0,
+        "failover_mode": "RESTART_INCARNATION_BUMP",
+        "new_incarnation_delta": 1
+      }
+    }
+  },
+  "fault_calibration_grid": {
+    "p_grid": [0.00, 0.01, 0.05, 0.20],
+    "N_cal_min": 1000,
+    "N_cal_max": 10000,
+    "confidence_level": 0.95,
+    "case_rules": {
+      "Case_A": "If U < 0.01, run 0.01 as stress cell; headline containment claim is conditional and not testable at measured rate",
+      "Case_B": "If 0.01 <= p <= 0.20, select p_main using nearest registered grid point within Clopper-Pearson interval",
+      "Case_C": "If L > 0.20, use 0.20 and 0.40 cells and flag cancellation mechanism as unreliable"
+    }
+  },
+  "parameter_freeze_ledger": {
+    "frozen_in_phase_0": [
+      {"parameter": "stages[].K_s", "value": "8, 16, 4", "status": "FROZEN"},
+      {"parameter": "stages[].tau_s", "value": "1.0s, 2.0s, 0.5s", "status": "FROZEN"},
+      {"parameter": "request_classes[].beta_cap", "value": "0.255s, 1.110s", "status": "FROZEN"},
+      {"parameter": "simulator_runtime", "value": "Python 3.11+ (exact-rational)", "status": "FROZEN"},
+      {"parameter": "postgresql_version", "value": "16.3 with test_decoding", "status": "FROZEN"},
+      {"parameter": "stream_changes", "value": false, "status": "FROZEN"},
+      {"parameter": "workload_timing_windows", "value": "Explicitly defined for W1, W2, W3", "status": "FROZEN"}
+    ],
+    "frozen_in_phase_5": [
+      {
+        "parameter": "p_main",
+        "value": 0.05,
+        "status": "FROZEN",
+        "frozen_date": "2026-10-11",
+        "calibration_summary": {
+          "total_trials": 4500,
+          "cancel_failures": 226,
+          "p_empirical": 0.0502,
+          "clopper_pearson_95_CI": [0.0440, 0.0570],
+          "interval_width": 0.0130,
+          "decision_case": "CASE_B",
+          "rationale": "Interval [0.0440, 0.0570] contains grid point 0.05. Selected 0.05.",
+          "kill_path_unconfirmed_rate": 0.00044
+        }
+      }
+    ],
+    "frozen_in_phase_6": [
+      {
+        "parameter": "delta_OE",
+        "value": 0.0328,
+        "status": "FROZEN",
+        "frozen_date": "2026-10-11",
+        "calibration_rule": "delta_OE = max(0.01, 0.5 * min(pilot OE means))",
+        "pilot_min_mean": 0.0656
+      },
+      {
+        "parameter": "delta_C",
+        "value": 0.0138,
+        "status": "FROZEN",
+        "frozen_date": "2026-10-11",
+        "calibration_rule": "delta_C = max(0.005, 0.5 * min(pilot S_L means))",
+        "pilot_min_mean": 0.0275
+      },
+      {
+        "parameter": "c_w (stale write weight)",
+        "value": 10.0,
+        "status": "FROZEN",
+        "frozen_date": "2026-10-11",
+        "rationale": "High penalty for stale commits to prevent aggregate dilution"
+      },
+      {
+        "parameter": "N_confirmatory_seeds",
+        "value": 25,
+        "status": "FROZEN",
+        "frozen_date": "2026-10-11",
+        "power_analysis": {
+          "max_paired_sd": 0.0273,
+          "joint_power": 0.9987,
+          "target_power": 0.80,
+          "range": [20, 60]
+        }
+      },
+      {
+        "parameter": "pre_registration_sha256",
+        "value": "219fcd691d3c650505ec9dd6e47e2a46d5e17546c83bbca0812ee89f3080f73c",
+        "status": "FROZEN",
+        "frozen_date": "2026-10-11"
+      }
+    ],
+    "provisional_parameters": []
+  }
+}

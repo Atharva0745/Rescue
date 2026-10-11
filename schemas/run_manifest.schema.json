@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rescue4.org/schemas/run_manifest.schema.json",
+  "title": "RESCUE-4 Run Manifest Schema",
+  "description": "Validation schema for confirmatory and calibration experiment run manifests, ensuring no hidden defaults and full reproducibility.",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "run_id",
+    "timestamp_utc",
+    "code_provenance",
+    "config_fingerprint",
+    "experiment_metadata",
+    "seed_specification",
+    "arm_execution",
+    "fault_injection",
+    "environment_telemetry",
+    "evidence_type",
+    "execution_status"
+  ],
+  "properties": {
+    "manifest_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^RUN-[A-Z0-9_-]+$"
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "code_provenance": {
+      "type": "object",
+      "required": ["git_commit_hash", "git_branch", "clean_working_tree"],
+      "properties": {
+        "git_commit_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "git_branch": {
+          "type": "string"
+        },
+        "clean_working_tree": {
+          "type": "boolean"
+        },
+        "uncommitted_diff_sha256": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "config_fingerprint": {
+      "type": "object",
+      "required": ["config_id", "config_sha256", "pre_registration_hash"],
+      "properties": {
+        "config_id": {
+          "type": "string"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pre_registration_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "experiment_metadata": {
+      "type": "object",
+      "required": ["phase", "workload_id", "is_confirmatory"],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["PHASE_5_CALIBRATION", "PHASE_7_CONFIRMATORY_SIM", "PHASE_8_POSTGRES_TESTBED", "EXPLORATORY"]
+        },
+        "workload_id": {
+          "type": "string",
+          "enum": ["W1", "W2", "W3"]
+        },
+        "is_confirmatory": {
+          "type": "boolean"
+        },
+        "measurement_window_seconds": {
+          "type": "number",
+          "minimum": 0.0
+        }
+      }
+    },
+    "seed_specification": {
+      "type": "object",
+      "required": ["master_seed", "arrival_seed", "demand_seed", "fault_seed"],
+      "properties": {
+        "master_seed": {
+          "type": "integer"
+        },
+        "arrival_seed": {
+          "type": "integer"
+        },
+        "demand_seed": {
+          "type": "integer"
+        },
+        "fault_seed": {
+          "type": "integer"
+        },
+        "seed_block_id": {
+          "type": "string"
+        }
+      }
+    },
+    "arm_execution": {
+      "type": "object",
+      "required": ["admission_policy", "enforcement_level", "arm_order_index", "arm_order_permutation"],
+      "properties": {
+        "admission_policy": {
+          "type": "string",
+          "enum": ["A_PRIME", "D", "B"]
+        },
+        "enforcement_level": {
+          "type": "string",
+          "enum": ["NS", "TR", "OC"]
+        },
+        "arm_label": {
+          "type": "string",
+          "enum": ["A_PRIME-NS", "A_PRIME-TR", "A_PRIME-OC", "D-NS", "D-TR", "D-OC", "B-NS", "B-TR", "B-OC"]
+        },
+        "arm_order_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "arm_order_permutation": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "fault_injection": {
+      "type": "object",
+      "required": ["p_fail_configured", "p_main_frozen", "calibration_case"],
+      "properties": {
+        "p_fail_configured": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "p_main_frozen": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "calibration_case": {
+          "type": "string",
+          "enum": ["CASE_A_STRESS_CELL", "CASE_B_ON_GRID", "CASE_C_UNRELIABLE"]
+        },
+        "total_cancellation_attempts": {
+          "type": "integer"
+        },
+        "total_cancellation_failures": {
+          "type": "integer"
+        }
+      }
+    },
+    "environment_telemetry": {
+      "type": "object",
+      "required": ["os_platform", "python_version", "cpu_model", "cpu_core_count"],
+      "properties": {
+        "os_platform": {
+          "type": "string"
+        },
+        "python_version": {
+          "type": "string"
+        },
+        "cpu_model": {
+          "type": "string"
+        },
+        "cpu_core_count": {
+          "type": "integer"
+        },
+        "cpu_steal_fraction": {
+          "type": "number"
+        },
+        "cpu_throttling_detected": {
+          "type": "boolean"
+        },
+        "memory_total_bytes": {
+          "type": "integer"
+        },
+        "database_version": {
+          "type": ["string", "null"]
+        },
+        "database_plugin": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "evidence_type": {
+      "type": "string",
+      "enum": ["SIMULATION_ONLY", "POSTGRESQL_TESTBED", "MATHEMATICAL_PROOF"]
+    },
+    "execution_status": {
+      "type": "object",
+      "required": ["status", "exit_code"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["COMPLETED", "FAILED", "EXCLUDED_PER_RULE", "TIMEOUT"]
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "exclusion_reason": {
+          "type": ["string", "null"]
+        },
+        "error_details": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "primary_metrics": {
+      "type": "object",
+      "properties": {
+        "S_L": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "OE_executor_seconds": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "OE_stale_writes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "c_w_applied": {
+          "type": "number"
+        },
+        "OE_aggregate": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "OE_norm": {
+          "type": "number",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}
