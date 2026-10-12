@@ -1,0 +1,688 @@
+{
+  "meta": {
+    "document": "RESCUE-4 Statistical Pre-Registration",
+    "specification_version": "v1.5",
+    "phase": "Phase 6 - Statistical Pre-Registration",
+    "status": "FROZEN",
+    "frozen_at": "2026-10-11T17:45:00Z",
+    "note": "No confirmatory result has been inspected before this plan was frozen. Any later additions are labeled exploratory.",
+    "sha256_hash": "219fcd691d3c650505ec9dd6e47e2a46d5e17546c83bbca0812ee89f3080f73c"
+  },
+  "frozen_parameters": {
+    "p_main": 0.05,
+    "p_main_source": "Phase 5 calibration: CASE_B, 95% CI [0.0440, 0.0570]",
+    "delta_OE": 0.0328,
+    "delta_C": 0.0138,
+    "c_w": 10.0,
+    "non_inferiority_margin_P3": -0.03,
+    "alpha": 0.05,
+    "permutation_flips": 100000,
+    "n_confirmatory_seeds": 25,
+    "seed_range": [
+      20,
+      60
+    ]
+  },
+  "threshold_calibration": {
+    "delta_OE": 0.0328,
+    "delta_C": 0.0138,
+    "pilot_OE_means": {
+      "P-1a": 0.0686,
+      "P-1b": 0.1047,
+      "P-4a": 0.0656
+    },
+    "pilot_SL_means": {
+      "P-2": 0.0342,
+      "P-4b": 0.0275
+    },
+    "rule_OE": "delta_OE = max(0.01, 0.5 * min(pilot OE means))",
+    "rule_C": "delta_C = max(0.005, 0.5 * min(pilot S_L means))"
+  },
+  "hypotheses": {
+    "P-1a": {
+      "id": "P-1a",
+      "metric": "OE_norm",
+      "registered_alternative": "OE_norm(D-TR) - OE_norm(B-OC) > delta_OE",
+      "comparison": [
+        "D-TR",
+        "B-OC"
+      ],
+      "direction": "superiority",
+      "workload": "W3",
+      "fault_cell": "p_main",
+      "purpose": "Test OE improvement over the strengthened D baseline"
+    },
+    "P-1b": {
+      "id": "P-1b",
+      "metric": "OE_norm",
+      "registered_alternative": "OE_norm(A'-TR) - OE_norm(B-OC) > delta_OE",
+      "comparison": [
+        "A'-TR",
+        "B-OC"
+      ],
+      "direction": "superiority",
+      "workload": "W3",
+      "fault_cell": "p_main",
+      "purpose": "Test OE improvement over the strengthened A' baseline"
+    },
+    "P-2": {
+      "id": "P-2",
+      "metric": "S_L",
+      "registered_alternative": "S_L(B-OC) - S_L(D-TR) >= delta_C",
+      "comparison": [
+        "B-OC",
+        "D-TR"
+      ],
+      "direction": "superiority",
+      "workload": "W3",
+      "fault_cell": "p_main",
+      "purpose": "Test legitimate-request success improvement"
+    },
+    "P-3": {
+      "id": "P-3",
+      "metric": "S_L",
+      "registered_alternative": "S_L(B-OC) - S_L(D-OC) >= -0.03",
+      "comparison": [
+        "B-OC",
+        "D-OC"
+      ],
+      "direction": "non-inferiority",
+      "workload": "W1",
+      "fault_cell": "alpha_0_no_attack",
+      "purpose": "Test the no-attack non-inferiority guardrail",
+      "non_inferiority_margin": -0.03
+    },
+    "P-4a": {
+      "id": "P-4a",
+      "metric": "OE_norm",
+      "registered_alternative": "OE_norm(B-TR) - OE_norm(B-OC) > delta_OE",
+      "comparison": [
+        "B-TR",
+        "B-OC"
+      ],
+      "direction": "superiority",
+      "workload": "W3",
+      "fault_cell": "p_main",
+      "purpose": "Test incremental OE benefit from OC over TR within B"
+    },
+    "P-4b": {
+      "id": "P-4b",
+      "metric": "S_L",
+      "registered_alternative": "S_L(B-OC) - S_L(B-TR) >= delta_C",
+      "comparison": [
+        "B-OC",
+        "B-TR"
+      ],
+      "direction": "superiority",
+      "workload": "W3",
+      "fault_cell": "p_main",
+      "purpose": "Test incremental legitimate-request success from OC over TR within B"
+    }
+  },
+  "metric_definitions": {
+    "OE_norm": {
+      "full_name": "Normalized Orphaned-Work Exposure",
+      "formula": "OE_norm = OE / sum_s(K_s * T_window)",
+      "OE_definition": "OE = executor_seconds_past_expiry + stale_write_commits * c_w",
+      "components_reported_separately": true,
+      "component_1": "executor_seconds_past_expiry: total wall-clock seconds executors ran beyond lease expiry",
+      "component_2": "stale_write_commits: count of committed writes with stale fence version, weighted by c_w",
+      "normalization_denominator": "sum over stages s of (K_s * T_window)",
+      "note": "A favorable aggregate must not conceal a regression in one component"
+    },
+    "S_L": {
+      "full_name": "Legitimate-Request Success Rate",
+      "formula": "S_L = (legitimate requests with full response by arrival + D_c) / (total legitimate requests in measurement window)",
+      "failure_definition": "Rejections and timeouts count as failures",
+      "per_seed": true,
+      "reporting": "Per-arm per-seed values, paired differences, and registered aggregate statistics"
+    }
+  },
+  "measurement_windows": {
+    "W1": {
+      "total_duration_s": 60.0,
+      "warmup_s": 10.0,
+      "measurement_window_s": 40.0,
+      "cooldown_s": 10.0
+    },
+    "W3": {
+      "total_duration_s": 90.0,
+      "warmup_s": 15.0,
+      "measurement_window_s": 60.0,
+      "cooldown_s": 15.0
+    }
+  },
+  "paired_design": {
+    "unit": "A seed defines the arrival trace, request classes, demand draws, and fault draws.",
+    "pairing": "Arms in a contrast use the same trace and draws.",
+    "arm_randomization": "Arm execution order is randomized per seed.",
+    "per_seed_storage": "Per-seed results are stored, not only aggregate averages."
+  },
+  "primary_test": {
+    "name": "One-sided paired sign-flip permutation test",
+    "n_flips": 100000,
+    "threshold_in_null": true,
+    "description": "The threshold (delta_OE or delta_C) is incorporated into the null. Under H0, each centered difference is equally likely positive or negative."
+  },
+  "assumption_diagnostics": {
+    "all_assumptions_supported": true,
+    "fallback_test": null,
+    "per_hypothesis": {
+      "P-1a": {
+        "n_pilot": 12,
+        "mean": 0.068585,
+        "sd": 0.026091,
+        "skewness": 0.9802,
+        "outlier_count": 0,
+        "symmetry_ok": true,
+        "no_outliers": true,
+        "variability_ok": true,
+        "assumptions_supported": true
+      },
+      "P-1b": {
+        "n_pilot": 12,
+        "mean": 0.104714,
+        "sd": 0.023306,
+        "skewness": 0.7327,
+        "outlier_count": 0,
+        "symmetry_ok": true,
+        "no_outliers": true,
+        "variability_ok": true,
+        "assumptions_supported": true
+      },
+      "P-2": {
+        "n_pilot": 12,
+        "mean": 0.034208,
+        "sd": 0.016829,
+        "skewness": 0.5204,
+        "outlier_count": 0,
+        "symmetry_ok": true,
+        "no_outliers": true,
+        "variability_ok": true,
+        "assumptions_supported": true
+      },
+      "P-3": {
+        "n_pilot": 12,
+        "mean": 0.012373,
+        "sd": 0.010751,
+        "skewness": -0.3245,
+        "outlier_count": 0,
+        "symmetry_ok": true,
+        "no_outliers": true,
+        "variability_ok": true,
+        "assumptions_supported": true
+      },
+      "P-4a": {
+        "n_pilot": 12,
+        "mean": 0.065584,
+        "sd": 0.022873,
+        "skewness": 0.4344,
+        "outlier_count": 0,
+        "symmetry_ok": true,
+        "no_outliers": true,
+        "variability_ok": true,
+        "assumptions_supported": true
+      },
+      "P-4b": {
+        "n_pilot": 12,
+        "mean": 0.027522,
+        "sd": 0.014516,
+        "skewness": 0.5539,
+        "outlier_count": 0,
+        "symmetry_ok": true,
+        "no_outliers": true,
+        "variability_ok": true,
+        "assumptions_supported": true
+      }
+    }
+  },
+  "fallback_procedure": {
+    "trigger": "If sign-flip assumptions are not adequately supported by pilot differences",
+    "fallback_test": "Wilcoxon signed-rank test (one-sided)",
+    "rule": "Use ONLY the fallback specified before confirmatory runs. Do not select between primary and fallback after observing results."
+  },
+  "decision_rules": {
+    "joint_claim": {
+      "rule": "The joint claim is supported only if ALL six hypotheses reject under the registered one-sided decision rule.",
+      "method": "Intersection-union test"
+    },
+    "individual_claims": {
+      "rule": "Report individual claims using Holm step-down adjustment across the six hypotheses.",
+      "note": "Do not infer that OC is novel merely because B-OC beats a baseline; P-4a and P-4b specifically test whether OC adds value beyond TR."
+    },
+    "interpretation_table": {
+      "all_six_reject": "Containment benefit supported at p_main for the tested stack and configuration",
+      "P1_P2_reject_but_not_P4": "Improvement may be attributable to semaphore/budgets; OC novelty claim fails",
+      "P4_reject_but_not_P1_P2": "OC may help within B, but superiority over required baselines not established",
+      "P3_fails": "No-attack overhead/non-inferiority guardrail fails",
+      "case_A_calibration": "Report claim as conditional; stress cell is not the measured operating condition",
+      "power_below_requirement": "Inconclusive",
+      "gate_failure": "Do not make claims that depend on that gate"
+    },
+    "confidence_intervals": {
+      "method": "BCa bootstrap",
+      "role": "Descriptive only",
+      "disagreement_rule": "If CI and registered test disagree, apply the pre-registered decision rule"
+    }
+  },
+  "power_analysis": {
+    "pilot_statistics": {
+      "P-1a": {
+        "mean": 0.0686,
+        "sd": 0.0273
+      },
+      "P-1b": {
+        "mean": 0.1047,
+        "sd": 0.0243
+      },
+      "P-2": {
+        "mean": 0.0342,
+        "sd": 0.0176
+      },
+      "P-3": {
+        "mean": 0.0124,
+        "sd": 0.0112
+      },
+      "P-4a": {
+        "mean": 0.0656,
+        "sd": 0.0239
+      },
+      "P-4b": {
+        "mean": 0.0275,
+        "sd": 0.0152
+      }
+    },
+    "max_paired_sd": 0.0273,
+    "max_sd_hypothesis": "P-1a",
+    "thresholds_used": {
+      "P-1a": 0.0328,
+      "P-1b": 0.0328,
+      "P-2": 0.0138,
+      "P-3": -0.03,
+      "P-4a": 0.0328,
+      "P-4b": 0.0138
+    },
+    "n_formula_raw": 25,
+    "n_required": 25,
+    "n_range": [
+      20,
+      60
+    ],
+    "joint_power_at_N": 0.9987,
+    "per_hypothesis_power": {
+      "P-1a": 1.0,
+      "P-1b": 1.0,
+      "P-2": 0.9999,
+      "P-3": 1.0,
+      "P-4a": 1.0,
+      "P-4b": 0.9988
+    },
+    "power_adequate": true,
+    "inconclusive_rule": null,
+    "n_power_simulations": 10000
+  },
+  "seed_manifest": {
+    "n_seeds": 25,
+    "master_seed": 20261011,
+    "arms": [
+      "A'-TR",
+      "D-TR",
+      "D-OC",
+      "B-TR",
+      "B-OC"
+    ],
+    "seed_blocks": [
+      {
+        "seed_index": 1,
+        "seed_value": 615743,
+        "arm_execution_order": [
+          "A'-TR",
+          "B-OC",
+          "D-TR",
+          "B-TR",
+          "D-OC"
+        ],
+        "fault_draw_seed": 157513,
+        "trace_seed": 141948
+      },
+      {
+        "seed_index": 2,
+        "seed_value": 475545,
+        "arm_execution_order": [
+          "D-TR",
+          "B-OC",
+          "D-OC",
+          "A'-TR",
+          "B-TR"
+        ],
+        "fault_draw_seed": 839661,
+        "trace_seed": 898766
+      },
+      {
+        "seed_index": 3,
+        "seed_value": 803898,
+        "arm_execution_order": [
+          "B-TR",
+          "A'-TR",
+          "B-OC",
+          "D-TR",
+          "D-OC"
+        ],
+        "fault_draw_seed": 595005,
+        "trace_seed": 127599
+      },
+      {
+        "seed_index": 4,
+        "seed_value": 103810,
+        "arm_execution_order": [
+          "B-TR",
+          "D-OC",
+          "A'-TR",
+          "B-OC",
+          "D-TR"
+        ],
+        "fault_draw_seed": 488778,
+        "trace_seed": 951758
+      },
+      {
+        "seed_index": 5,
+        "seed_value": 846764,
+        "arm_execution_order": [
+          "D-TR",
+          "B-OC",
+          "A'-TR",
+          "D-OC",
+          "B-TR"
+        ],
+        "fault_draw_seed": 369981,
+        "trace_seed": 538176
+      },
+      {
+        "seed_index": 6,
+        "seed_value": 826377,
+        "arm_execution_order": [
+          "B-OC",
+          "A'-TR",
+          "B-TR",
+          "D-TR",
+          "D-OC"
+        ],
+        "fault_draw_seed": 990747,
+        "trace_seed": 473595
+      },
+      {
+        "seed_index": 7,
+        "seed_value": 633725,
+        "arm_execution_order": [
+          "B-OC",
+          "B-TR",
+          "D-OC",
+          "D-TR",
+          "A'-TR"
+        ],
+        "fault_draw_seed": 171929,
+        "trace_seed": 596275
+      },
+      {
+        "seed_index": 8,
+        "seed_value": 458623,
+        "arm_execution_order": [
+          "A'-TR",
+          "B-TR",
+          "D-TR",
+          "B-OC",
+          "D-OC"
+        ],
+        "fault_draw_seed": 585788,
+        "trace_seed": 331817
+      },
+      {
+        "seed_index": 9,
+        "seed_value": 947365,
+        "arm_execution_order": [
+          "B-OC",
+          "D-OC",
+          "B-TR",
+          "A'-TR",
+          "D-TR"
+        ],
+        "fault_draw_seed": 132650,
+        "trace_seed": 751008
+      },
+      {
+        "seed_index": 10,
+        "seed_value": 625482,
+        "arm_execution_order": [
+          "D-OC",
+          "B-OC",
+          "A'-TR",
+          "B-TR",
+          "D-TR"
+        ],
+        "fault_draw_seed": 416663,
+        "trace_seed": 397918
+      },
+      {
+        "seed_index": 11,
+        "seed_value": 377805,
+        "arm_execution_order": [
+          "B-TR",
+          "D-TR",
+          "A'-TR",
+          "D-OC",
+          "B-OC"
+        ],
+        "fault_draw_seed": 884218,
+        "trace_seed": 484597
+      },
+      {
+        "seed_index": 12,
+        "seed_value": 540300,
+        "arm_execution_order": [
+          "D-TR",
+          "B-TR",
+          "A'-TR",
+          "D-OC",
+          "B-OC"
+        ],
+        "fault_draw_seed": 749889,
+        "trace_seed": 464183
+      },
+      {
+        "seed_index": 13,
+        "seed_value": 601102,
+        "arm_execution_order": [
+          "B-OC",
+          "B-TR",
+          "D-OC",
+          "D-TR",
+          "A'-TR"
+        ],
+        "fault_draw_seed": 646778,
+        "trace_seed": 639983
+      },
+      {
+        "seed_index": 14,
+        "seed_value": 764435,
+        "arm_execution_order": [
+          "D-TR",
+          "A'-TR",
+          "B-TR",
+          "D-OC",
+          "B-OC"
+        ],
+        "fault_draw_seed": 732492,
+        "trace_seed": 578032
+      },
+      {
+        "seed_index": 15,
+        "seed_value": 199423,
+        "arm_execution_order": [
+          "A'-TR",
+          "D-TR",
+          "D-OC",
+          "B-TR",
+          "B-OC"
+        ],
+        "fault_draw_seed": 746747,
+        "trace_seed": 903736
+      },
+      {
+        "seed_index": 16,
+        "seed_value": 305767,
+        "arm_execution_order": [
+          "B-TR",
+          "D-OC",
+          "D-TR",
+          "A'-TR",
+          "B-OC"
+        ],
+        "fault_draw_seed": 225143,
+        "trace_seed": 451836
+      },
+      {
+        "seed_index": 17,
+        "seed_value": 999751,
+        "arm_execution_order": [
+          "A'-TR",
+          "B-TR",
+          "B-OC",
+          "D-OC",
+          "D-TR"
+        ],
+        "fault_draw_seed": 111589,
+        "trace_seed": 521041
+      },
+      {
+        "seed_index": 18,
+        "seed_value": 878497,
+        "arm_execution_order": [
+          "A'-TR",
+          "D-OC",
+          "B-OC",
+          "B-TR",
+          "D-TR"
+        ],
+        "fault_draw_seed": 887288,
+        "trace_seed": 639271
+      },
+      {
+        "seed_index": 19,
+        "seed_value": 116215,
+        "arm_execution_order": [
+          "B-TR",
+          "D-OC",
+          "D-TR",
+          "A'-TR",
+          "B-OC"
+        ],
+        "fault_draw_seed": 976217,
+        "trace_seed": 569086
+      },
+      {
+        "seed_index": 20,
+        "seed_value": 712096,
+        "arm_execution_order": [
+          "D-TR",
+          "B-OC",
+          "A'-TR",
+          "D-OC",
+          "B-TR"
+        ],
+        "fault_draw_seed": 651390,
+        "trace_seed": 634865
+      },
+      {
+        "seed_index": 21,
+        "seed_value": 561051,
+        "arm_execution_order": [
+          "D-TR",
+          "B-TR",
+          "A'-TR",
+          "B-OC",
+          "D-OC"
+        ],
+        "fault_draw_seed": 425648,
+        "trace_seed": 950285
+      },
+      {
+        "seed_index": 22,
+        "seed_value": 866132,
+        "arm_execution_order": [
+          "D-TR",
+          "B-TR",
+          "A'-TR",
+          "B-OC",
+          "D-OC"
+        ],
+        "fault_draw_seed": 790478,
+        "trace_seed": 111225
+      },
+      {
+        "seed_index": 23,
+        "seed_value": 616988,
+        "arm_execution_order": [
+          "B-TR",
+          "D-TR",
+          "B-OC",
+          "A'-TR",
+          "D-OC"
+        ],
+        "fault_draw_seed": 443178,
+        "trace_seed": 963955
+      },
+      {
+        "seed_index": 24,
+        "seed_value": 454951,
+        "arm_execution_order": [
+          "B-OC",
+          "D-TR",
+          "B-TR",
+          "D-OC",
+          "A'-TR"
+        ],
+        "fault_draw_seed": 541519,
+        "trace_seed": 839898
+      },
+      {
+        "seed_index": 25,
+        "seed_value": 787553,
+        "arm_execution_order": [
+          "A'-TR",
+          "B-OC",
+          "D-OC",
+          "B-TR",
+          "D-TR"
+        ],
+        "fault_draw_seed": 258394,
+        "trace_seed": 788317
+      }
+    ],
+    "exclusion_policy": {
+      "rule": "A seed is excluded only if execution fails for ALL arms in the contrast (infrastructure failure). Partial failures (one arm succeeds, other fails) are recorded and analyzed.",
+      "replacement": "Excluded seeds are NOT replaced. The analysis uses the remaining seeds.",
+      "reporting": "All exclusions, their reasons, and any deviation from the registered plan are reported."
+    }
+  },
+  "secondary_analyses": {
+    "fault_sweep": {
+      "cells": [
+        0.0,
+        0.01,
+        0.05,
+        0.2
+      ],
+      "note": "Plus any additional cell required by above-grid calibration rule",
+      "zero_fault_check": "Mandatory zero-fault overhead check included",
+      "crossover_analysis": "Report the crossover point where OC begins to outperform TR"
+    },
+    "status": "Secondary analyses do not replace or redefine the primary hypotheses"
+  },
+  "required_records_per_run": [
+    "Code revision and configuration hash",
+    "Seed, workload, arm, arm order, fault draws, and calibration cell",
+    "PostgreSQL and logical-decoding versions/configuration where applicable",
+    "OS, CPU, memory, service-rate, executor, and database measurements",
+    "Run completion status, errors, deviations, exclusions, and reasons"
+  ]
+}

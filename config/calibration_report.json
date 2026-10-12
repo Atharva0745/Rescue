@@ -1,0 +1,66 @@
+{
+  "total_trials": 4500,
+  "total_cancel_failures": 226,
+  "p_empirical": 0.050222222222222224,
+  "clopper_pearson_95": [
+    0.04402363245246565,
+    0.057012432537964064
+  ],
+  "case": "CASE_B",
+  "p_main_frozen": 0.05,
+  "case_rationale": "Interval [0.0440, 0.0570] contains grid points [0.05]. Selected 0.05.",
+  "per_stage": {
+    "S1_INGEST": {
+      "trials": 1500,
+      "failures": 79,
+      "p_hat": 0.05266666666666667,
+      "ci_95": [
+        0.04191525493271237,
+        0.06520898105037476
+      ]
+    },
+    "S2_PROCESS": {
+      "trials": 1500,
+      "failures": 72,
+      "p_hat": 0.048,
+      "ci_95": [
+        0.03774357001046965,
+        0.06006895697835126
+      ]
+    },
+    "S3_PERSIST": {
+      "trials": 1500,
+      "failures": 75,
+      "p_hat": 0.05,
+      "ci_95": [
+        0.03952818862940644,
+        0.062275012872789304
+      ]
+    }
+  },
+  "per_class": {
+    "C_INTERACTIVE": {
+      "trials": 2223,
+      "failures": 100,
+      "p_hat": 0.0449842555105713,
+      "ci_95": [
+        0.03674828134610155,
+        0.054444678292658165
+      ]
+    },
+    "C_BATCH": {
+      "trials": 2277,
+      "failures": 126,
+      "p_hat": 0.05533596837944664,
+      "ci_95": [
+        0.046302746086291646,
+        0.06553347138890385
+      ]
+    }
+  },
+  "kill_path_unconfirmed": {
+    "trials": 4500,
+    "failures": 2,
+    "rate": 0.00044444444444444447
+  }
+}

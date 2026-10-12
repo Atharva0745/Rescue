@@ -1,0 +1,90 @@
+{
+  "meta": {
+    "document": "RESCUE-4 PostgreSQL Testbed Validation Report",
+    "phase": "Phase 8 - PostgreSQL Testbed Validation",
+    "status": "COMPLETED",
+    "execution_timestamp": "2026-10-11T18:06:10Z",
+    "exit_gate": "C1_EQUIVALENT_PASSED"
+  },
+  "decoder_configuration": {
+    "engine": "PostgreSQL",
+    "version": "16.3",
+    "plugin": "test_decoding",
+    "wal_level": "logical",
+    "decoding_options": {
+      "include-xids": "1",
+      "include-timestamp": "1",
+      "stream-changes": "0",
+      "skip-empty-xacts": "1",
+      "only-local": "0"
+    },
+    "replication_slot": {
+      "slot_name": "rescue_fencing_slot",
+      "plugin": "test_decoding",
+      "slot_type": "logical",
+      "database": "rescue_primary"
+    },
+    "server_settings": {
+      "max_replication_slots": 10,
+      "max_wal_senders": 10,
+      "synchronous_commit": "on",
+      "shared_preload_libraries": []
+    },
+    "tables": {
+      "fence_log": "public.fence_log (gw TEXT, seq BIGINT, inc_new INT, epoch_new INT, created_at TIMESTAMPTZ)",
+      "audit": "public.audit (write_id BIGINT, gw TEXT, inc INT, epoch INT, tx_timestamp TIMESTAMPTZ)",
+      "account_ledger": "public.account_ledger (write_id BIGINT, account_id TEXT, delta NUMERIC, balance NUMERIC)",
+      "resource_registry": "public.resource_registry (write_id BIGINT, resource_id TEXT, status TEXT)"
+    }
+  },
+  "validation_suites": {
+    "suite_1_commit_order_differential": {
+      "test_suite": "Suite 1: Commit-Order Differential",
+      "transactions_evaluated": 10000,
+      "disagreements": 0,
+      "throughput_tx_per_sec": 49794.9,
+      "status": "PASSED"
+    },
+    "suite_2_planted_stale_and_late": {
+      "test_suite": "Suite 2: Planted Stale & Legitimate Late",
+      "planted_stale_trials": 1000,
+      "planted_stale_detected": 1000,
+      "stale_detection_rate": 1.0,
+      "late_completions_tested": 1000,
+      "late_false_positives": 0,
+      "status": "PASSED"
+    },
+    "suite_3_edge_cases": {
+      "test_suite": "Suite 3: Protocol Edge Cases",
+      "edge_cases": {
+        "mixed_transaction": "FLAGGED_AND_REJECTED",
+        "unaudited_bypass": "FLAGGED_AND_REJECTED",
+        "orphan_audit": "FLAGGED_AND_REJECTED",
+        "non_monotone_bump": "FLAGGED_AND_REJECTED",
+        "unknown_gateway": "FLAGGED_AND_REJECTED"
+      },
+      "status": "PASSED"
+    },
+    "suite_4_crash_consistency_and_slot_lag": {
+      "test_suite": "Suite 4: Crash Consistency & Slot Lag",
+      "checkpoint_lsn": 25107511,
+      "replayed_deduplicated": 10,
+      "lagged_txs_caught_up": 20,
+      "status": "PASSED"
+    },
+    "suite_5_decoder_mutants": {
+      "test_suite": "Suite 5: Decoder Mutants M1--M4",
+      "mutants_evaluated": {
+        "M1_STALE_BLIND": "CAUGHT",
+        "M2_LATE_FALSE_POS": "CAUGHT",
+        "M3_MIXED_BLIND": "CAUGHT",
+        "M4_AUDIT_BLIND": "CAUGHT"
+      },
+      "status": "PASSED"
+    }
+  },
+  "gate_c1_equivalent_decision": {
+    "status": "PASSED",
+    "rationale": "PostgreSQL 16.3 test_decoding stream parser validated across 10,000 committed transactions with 0 oracle disagreements; 100% planted stale commits detected; 0 legitimate late commits falsely flagged; crash consistency and LSN deduplication verified; all edge cases and mutants M1--M4 caught."
+  }
+}
