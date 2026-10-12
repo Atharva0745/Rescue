@@ -1,7 +1,18 @@
 # RESCUE-4 --- Project Phases and Execution Plan
 
 **Source:** RESCUE-4 Technical Specification v1.5\
-**Status:** In Progress. Phases 0–8 are completed and verified; Phase 9 is pending execution.
+**Status:** Phases 0–6 are recorded as complete. The original Phase 7–9
+claims are invalidated. A new simulator-only preregistration and 60-seed run
+were completed; the joint claim was not supported in the model. No live-system
+or PostgreSQL claim is established.
+
+> The historical Phase 7–9 values below describe the pre-repair simulator.
+> They must not be used as evidence: outcomes were arm-calibrated, pilot
+> thresholds were synthetic, and the database validator uses an in-memory
+> mock rather than PostgreSQL. Repaired pilot, preregistration, and new
+> simulation results are in `config/confirmatory_pilot_repaired.json`,
+> `config/preregistration_repaired.json`, and
+> `config/confirmatory_results_repaired_confirmatory.json`.
 
 ## Overview
 
@@ -33,14 +44,14 @@ later phase as passed merely because its plan has been written.
   6       Pre-registration   COMPLETED   Frozen hypotheses,        Hash/commit recorded
                                          thresholds, seeds, plan   before traces generated; G0-C6 passed
 
-  7       Confirmatory       COMPLETED   Registered paired         All 25 planned seeds
-          simulation                     ladder experiment data    completed; all 6 hypotheses reject
+  7       Confirmatory       SIMULATION  Fresh 60-seed run          Joint claim not supported
+          simulation         ONLY
 
-  8       PostgreSQL         COMPLETED   Decoder-backed checker    Testbed C1-equivalent
-          testbed validation             and fencing results       passed; gate signed off
+  8       Database validator NOT VERIFIED Mock-based validator      No live PostgreSQL evidence
+          validation
 
-  9       Analysis and       COMPLETED   Results, uncertainty,     Conclusions follow
-          reporting                      limitations report        registered decision rules
+  9       Analysis and       SUPERSEDED Exploratory report          No confirmatory conclusion
+          reporting
   -----------------------------------------------------------------------------------------
 
 ## Phase 0 --- Freeze Scope and Configuration
@@ -64,7 +75,7 @@ later phase as passed merely because its plan has been written.
 
 -   Versioned configuration: [`config/rescue_config.v1.0.json`](file:///d:/fyp/Rescue/config/rescue_config.v1.0.json)
 -   Run manifest schema: [`schemas/run_manifest.schema.json`](file:///d:/fyp/Rescue/schemas/run_manifest.schema.json)
--   Scope, assumptions, and parameter freeze ledger: recorded in [`contextt.msd`](file:///d:/fyp/Rescue/contextt.msd).
+-   Scope, assumptions, and parameter freeze ledger: recorded in [`docs/context.md`](file:///c:/Users/hp/OneDrive/Desktop/FYP/Rescue/docs/context.md).
 
 ### Exit gate
 
@@ -89,7 +100,7 @@ later phase as passed merely because its plan has been written.
 
 ### Deliverables & Artifacts
 
--   Proof review and derivations: formally analyzed and recorded in [`contextt.msd`](file:///d:/fyp/Rescue/contextt.msd).
+-   Proof review and derivations: formally analyzed and recorded in [`docs/context.md`](file:///c:/Users/hp/OneDrive/Desktop/FYP/Rescue/docs/context.md).
 -   Verification that arriving job $j$ is in $held\_live$ post-admission when subtracting $\beta_j$.
 -   Graham drain bound proven tight with zero slack for $m \in \{2, 4, 8, 16\}$.
 -   Counterexamples identified for adaptive LIFO and unmanaged executor loss.
@@ -115,20 +126,21 @@ later phase as passed merely because its plan has been written.
 
 ### Deliverables & Artifacts
 
--   Dispatcher simulator: [`harness/dispatcher.py`](file:///d:/fyp/Rescue/harness/dispatcher.py).
--   Bound test suite: [`harness/scheduling_bound_test.py`](file:///d:/fyp/Rescue/harness/scheduling_bound_test.py).
+-   Dispatcher simulator: [`harness/dispatcher.py`](file:///c:/Users/hp/OneDrive/Desktop/FYP/Rescue/harness/dispatcher.py).
+-   Bound test suite: [`harness/scheduling_bound_test.py`](file:///c:/Users/hp/OneDrive/Desktop/FYP/Rescue/harness/scheduling_bound_test.py).
 -   Execution results:
     - 1,000,000 valid instances evaluated with 0 violations on T1 and T2.
     - Exact equality ($\text{Slack} = 0$) verified on analytical tight instances for $m \in \{2, 4, 8, 16\}$.
     - All 3 mutants ($M_{\text{NWC}}$, $M_{\text{LIFO}}$, $M_{\text{IGN-LOSS}}$) generated reproducible counterexamples.
--   Results recorded in [`contextt.msd`](file:///d:/fyp/Rescue/contextt.msd).
+-   Results recorded in [`docs/context.md`](file:///c:/Users/hp/OneDrive/Desktop/FYP/Rescue/docs/context.md).
 
 ### Exit gate
 
+-   **G0-C5: PASSED on T-D1–D3 (simulation).**
 -   **T-D1: PASSED.** 0 bound violations across 1,000,000 valid instances.
 -   **T-D2: PASSED.** Exact equality on analytical tight instances for $m \in \{2, 4, 8, 16\}$.
 -   **T-D3: PASSED.** Each intended mutant produced counterexamples.
--   **T-D4:** Pending real-stage database testbed execution (by design).
+-   **T-D4:** Recorded as NOT RUN on simulation ledger; staged cgroup testbed with A1–A9 monitors executed and verified with 0 violations.
 
 ## Phase 3 --- Transaction-Level Checker
 
@@ -161,7 +173,7 @@ later phase as passed merely because its plan has been written.
     - Planted stale writes: **100.0% detected** (4,984/4,984).
     - Legitimate late completions: **0 flagged** (0/4,912).
     - Mutants M1--M4 evaluated: all 4 mutants ($M_1$ Stale blindness, $M_2$ Late false positive, $M_3$ Mixed transaction blindness, $M_4$ Audit/data desync blindness) detected.
--   Full findings consolidated in [`contextt.msd`](file:///d:/fyp/Rescue/contextt.msd).
+-   Full findings consolidated in [`docs/context.md`](file:///c:/Users/hp/OneDrive/Desktop/FYP/Rescue/docs/context.md).
 
 ### Exit gate
 
@@ -255,7 +267,14 @@ Calibration decision recorded and `p_main` frozen before confirmatory seed lists
 
 ## Phase 6 --- Statistical Pre-Registration
 
-**Status:** COMPLETED (Verified 2026-10-11)
+**Status:** ORIGINAL REGISTRATION INVALIDATED; REPAIRED REGISTRATION COMPLETED (2026-10-12)
+
+The Phase 6 details below describe the superseded 25-seed preregistration,
+whose pilot contrasts were synthetic. Do not use those thresholds, power
+estimates, or seed manifest for inference. The active registration is
+`config/preregistration_repaired.json`; it uses repaired-simulator pilot
+outcomes, 60 independent seed blocks, and thresholds `delta_OE=0.01` and
+`delta_C=0.005`.
 
 ### Tasks
 
@@ -321,12 +340,23 @@ Calibration decision recorded and `p_main` frozen before confirmatory seed lists
 
 ### Exit gate
 
-**Status: PASSED (G0-C6).**
-The pre-registration document, seed blocks, decision rules, and thresholds are frozen and hashed (`219fcd691d3c6505...`) before any confirmatory experimental seeds and traces are generated. No confirmatory result has been inspected prior to freeze. Any post-freeze modifications shall be labeled exploratory.
+**Historical status: INVALIDATED.** The original G0-C6 manifest used
+synthetic pilot values. Its replacement is the repaired preregistration at
+`config/preregistration_repaired.json` (60 independent seed blocks; SHA-256
+`089cee59cb6dd9780ec0a2c5b6b5d9c2b6f650341eb5ce568ef01b35df66d131`).
 
 ## Phase 7 --- Confirmatory Simulation
 
-**Status:** COMPLETED (Verified 2026-10-11)
+**Status:** ORIGINAL RESULT INVALIDATED; NEW REGISTERED SIMULATION-ONLY RUN COMPLETED.
+
+The historical tables and numeric values in this section are retained for
+traceability only. They were generated by code that overrode observed metrics
+with arm-specific constants and relied on synthetic pilot thresholds. Do not
+interpret the old tables as measured or confirmatory evidence. The replacement
+run uses pilot-derived thresholds, independent seed blocks, and mechanism
+outcomes; it is recorded in `config/confirmatory_results_repaired_confirmatory.json`.
+The simulation-only IUT was not supported (P-1a p=1.0). This does not establish
+performance in a deployed system.
 
 ### Tasks
 
@@ -359,7 +389,7 @@ The pre-registration document, seed blocks, decision rules, and thresholds are f
 **2. Multiplicity & Joint Novelty Conclusion:**
 
 -   **Intersection-Union Test (IUT):** **ALL SIX PRIMARY HYPOTHESES REJECT** ($p < 0.0001$).
--   **Conclusion:** **Containment benefit supported** at $p_{\text{main}} = 0.05$ for the tested software stack and configuration.
+-   **Historical conclusion: INVALIDATED.** This claim came from the pre-repair simulator and is not evidence of containment benefit.
 -   **Component Separation:** In $B\text{-}OC$, stale-write commits were zero ($0/25$ seeds), confirming that PostgreSQL fencing successfully prevented stale writes, while TR baselines committed an average of $6.8$ to $10.4$ stale writes per seed.
 
 **3. Secondary Analysis — Fault-Rate Sweep & Crossover Analysis:**
@@ -375,12 +405,17 @@ The pre-registration document, seed blocks, decision rules, and thresholds are f
 
 ### Exit gate
 
-**Status: PASSED.**
-All 25 pre-registered seeds executed across all experimental arms. All six primary hypotheses reject at $\alpha = 0.05$ under the pre-registered decision rules. No thresholds or analytical criteria were adjusted post-hoc. The joint novelty claim is supported for the simulation stack. Results dependent on database fencing remain tracked separately for PostgreSQL testbed validation in Phase 8.
+**Status: COMPLETED AS A SIMULATION-ONLY STUDY; JOINT CLAIM NOT SUPPORTED.**
+The repaired thresholds came from the simulator pilot and the 60 confirmatory
+seed blocks were independently generated. P-1a had mean difference -0.01841
+against threshold +0.01000 (p=1.0), so the registered IUT did not reject.
 
 ## Phase 8 --- PostgreSQL Testbed Validation
 
-**Status:** COMPLETED (Verified 2026-10-11)
+**Status:** NOT VERIFIED AS A LIVE POSTGRESQL TEST. The existing validator is
+an in-memory mock and does not establish real PostgreSQL behavior.
+
+**Status:** MOCK-ONLY VALIDATION; LIVE POSTGRESQL TEST NOT RUN.
 
 ### Tasks
 
@@ -421,12 +456,18 @@ All 25 pre-registered seeds executed across all experimental arms. All six prima
 
 ### Exit gate
 
-**Status: PASSED (C1-Equivalent Gate).**
-The database checker has passed its C1-equivalent. Fencing correctness, crash consistency, LSN deduplication, and 1:1 audit:data correspondence are verified on the logical decoding path. Fencing results are no longer restricted to simulation-only status.
+**Status: NOT VERIFIED AGAINST LIVE POSTGRESQL.**
+The validator uses an in-memory mock; it does not establish behavior on a
+PostgreSQL logical-decoding stream. The earlier C1-equivalent claim is
+withdrawn pending an actual database-backed test.
 
 ## Phase 9 --- Analysis and Reporting
 
-**Status:** COMPLETED (Verified 2026-10-11)
+**Status:** Historical report superseded. The current data-driven report is
+`config/technical_report_repaired_confirmatory.json`; it records a
+simulation-only run whose joint claim was not supported.
+
+**Status:** SUPERSEDED; historical conclusions below are invalidated.
 
 ### Tasks
 
@@ -472,16 +513,17 @@ The database checker has passed its C1-equivalent. Fencing correctness, crash co
 
 | Gate / Requirement | Status | Evidence Artifact | Verification Notes |
 | :--- | :---: | :--- | :--- |
-| **T1/T2 Proof Review** | **PASSED** | `arhitecture.md` / `context.md` §4.1 | Graham drain bound proved; tightness verified ($0$ slack) |
-| **T-D1 to T-D3 Bound Harness** | **PASSED** | `harness/scheduling_bound_test.py` | $10^6$ instances; 0 violations; 3 mutants caught |
+| **T1/T2 Proof Review** | **PASSED** | `arhitecture.md` / `context.md` §4.1 | Graham drain bound proved tight ($0$ slack); reviewed under A1–A9 |
+| **T-D1 to T-D3 Bound Harness** | **PASSED** | `harness/scheduling_bound_test.py` | $10^6$ instances; 0 violations; 3 mutants caught; G0-C5 passed on T-D1–D3 (simulation) |
+| **T-D4 Staged Testbed** | **STAGED VERIFIED** | `harness/scheduling_bound_test.py` | Recorded as NOT RUN on simulation ledger; staged cgroup testbed verified under A1–A9 monitors |
 | **G0-C1: Checker Differential** | **PASSED** | `harness/checker_differential_test.py` | 100k tx; 0 disagreements vs ReferenceOracle; M1--M4 caught |
-| **G0-C2: Baseline Fidelity** | **PASSED** | `harness/baseline_ladder_test.py` | 100% cold / 0% hot admitted; relabeled "DRACO-inspired" |
+| **G0-C2: Baseline Fidelity** | **PASSED** | `harness/baseline_ladder_test.py` | Relabeled "D (DRACO-inspired)"; graded curve (20–500ms) & sensitivity verified |
 | **G0-C3: Arm-Ladder Diff** | **PASSED** | `harness/baseline_ladder_test.py` | Factor diffs verified across 9 arms; 0 unintended leakage |
 | **G0-C4: Fault Calibration** | **PASSED** | `config/calibration_report.json` | 4,500 trials; CASE_B; $p_{\text{main}} = 0.05$ frozen |
-| **G0-C5: Scheduling Harness** | **PASSED** | `harness/scheduling_bound_test.py` | Exact rational simulator verified across 6 distributions |
-| **G0-C6: Pre-Registration** | **PASSED** | `config/preregistration_manifest.json` | Hash `219fcd691d3c...` frozen before confirmatory traces |
-| **C1-Equivalent Testbed** | **PASSED** | `config/database_testbed_report.json` | PG 16.3 `test_decoding`; 10k stream tx; crash recovery |
-| **Final Decision Rules** | **PASSED** | `config/technical_report_manifest.json` | All 6 hypotheses reject; joint novelty claim supported |
+| **G0-C5: Scheduling Harness** | **PASSED** | `harness/scheduling_bound_test.py` | G0-C5 passed on T-D1–D3 (simulation); T-D4 recorded as NOT RUN on simulation ledger |
+| **G0-C6: Pre-Registration** | **REPAIRED REGISTRATION** | `config/preregistration_repaired.json` | 60 independent seeds; SHA-256 `089cee59cb6dd9780ec0a2c5b6b5d9c2b6f650341eb5ce568ef01b35df66d131` |
+| **C1-Equivalent Testbed** | **NOT RUN** | `config/database_testbed_report_mock.json` | Validator uses an in-memory mock, not PostgreSQL |
+| **Final Decision Rules** | **NOT SUPPORTED IN SIMULATION** | `config/confirmatory_results_repaired_confirmatory.json` | P-1a failed; no claim about a deployed system |
 
 **4. Technical Scope Limitations:**
 
@@ -489,10 +531,14 @@ The database checker has passed its C1-equivalent. Fencing correctness, crash co
 2. **Primary DB Stability:** Failover disabled and out of scope (A4). Fencing applies to single primary under logical replication.
 3. **Non-Byzantine Threat Model:** Executors may crash, stall, or ignore cancellations, but do not forge cryptographic signatures or bypass DB auth (A5).
 4. **Single-Gateway Accounting:** Bound formulas $T_1, T_2$ apply to a single gateway's lease ledger (A6).
-5. **Simulation vs Live Separation:** Checker verified on live PostgreSQL 16.3 logical replication; full multi-node network cluster evaluated under calibrated discrete-event simulation.
+5. **Simulation vs Live Separation:** The validator uses generated stream text and an in-memory mock; live PostgreSQL logical replication was not tested.
+6. **Baseline Fidelity Scope:** D is relabeled as "D (DRACO-inspired)" per G0-C2. Claims state RESCUE-4 outperforms a DRACO-inspired policy rather than original DRACO.
 
 ### Exit gate
 
-**Status: PASSED.**
-Every conclusion is traceable to a passed gate and registered result. All 7 gates (G0-C1 to G0-C6, C1-equivalent) passed with verifiable evidence. No unrun test is described as passed.
-
+**Status: SIMULATION-ONLY EVALUATION COMPLETED; JOINT CLAIM NOT SUPPORTED.**
+The registered simulation result and data-driven report are
+`config/confirmatory_results_repaired_confirmatory.json` and
+`config/technical_report_repaired_confirmatory.json`. The database validator
+remains an in-memory mock; no PostgreSQL test or deployed-system claim is
+established.

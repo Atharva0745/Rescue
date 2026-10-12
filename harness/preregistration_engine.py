@@ -23,8 +23,10 @@ import json
 import hashlib
 import random
 import math
+import os
 from typing import Dict, List, Tuple, Any, Optional
 from datetime import datetime, timezone
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -275,9 +277,69 @@ def sign_flip_permutation_test(
         "threshold": threshold,
         "n_flips": n_flips,
         "n_pairs": n,
-        "p_value": round(p_value, 6),
+        "p_value": p_value,
         "reject_at_0.05": p_value < 0.05
     }
+
+
+def exact_signflip_p(d: List[float], delta: float, tol: float = 1e-12) -> float:
+    """
+    Exact one-sided sign-flip permutation test using meet-in-the-middle partition.
+    Evaluates all 2^N (2^25 = 33,554,432) sign patterns in milliseconds.
+    Smallest possible p-value for N=25 is 2^-25 ≈ 2.9802e-8.
+    """
+    x = np.asarray(d, dtype=float) - delta
+    obs = x.sum()
+    def sums(v):
+        s = np.zeros(1)
+        for t in v:
+            s = np.concatenate([s + t, s - t])
+        return s
+    half = len(x) // 2
+    sa = sums(x[:half])
+    sb = np.sort(sums(x[half:]))
+    cnt = (len(sb) - np.searchsorted(sb, obs - sa - tol, side="left")).sum()
+    return float(cnt / (2 ** len(x)))
+
+
+def exact_wilcoxon_signed_rank_p(diffs: List[float], threshold: float) -> float:
+    """Return an exact one-sided Wilcoxon signed-rank p-value for shifted pairs."""
+    shifted = [value - threshold for value in diffs]
+    nonzero = [value for value in shifted if value != 0.0]
+    if not nonzero:
+        raise ValueError("Wilcoxon signed-rank test has no non-zero differences")
+
+    ordered = sorted(enumerate(nonzero), key=lambda item: abs(item[1]))
+    rank_weights = [0] * len(ordered)
+    index = 0
+    while index < len(ordered):
+        end = index + 1
+        magnitude = abs(ordered[index][1])
+        while end < len(ordered) and abs(ordered[end][1]) == magnitude:
+            end += 1
+        average_rank = ((index + 1) + end) / 2.0
+        scaled_rank = int(round(2.0 * average_rank))
+        for rank_index in range(index, end):
+            rank_weights[rank_index] = scaled_rank
+        index = end
+
+    observed_positive_rank_sum = sum(
+        rank_weights[i]
+        for i, (_, value) in enumerate(ordered)
+        if value > 0
+    )
+    total_rank = sum(rank_weights)
+    counts = [0] * (total_rank + 1)
+    counts[0] = 1
+    reachable = 0
+    for weight in rank_weights:
+        for rank_sum in range(reachable, -1, -1):
+            if counts[rank_sum]:
+                counts[rank_sum + weight] += counts[rank_sum]
+        reachable += weight
+
+    extreme = sum(counts[observed_positive_rank_sum:])
+    return extreme / (2 ** len(nonzero))
 
 
 def check_sign_flip_assumptions(
@@ -395,39 +457,31 @@ def compute_sample_size_and_power(
     n_formula = ceil((z_alpha + z_beta) ** 2 * max_sd ** 2 / min_effect ** 2)
     n_required = max(n_min, min(n_max, n_formula))
 
-    # Simulate joint power at N = n_required
-    joint_rejections = 0
-    per_hyp_rejections = {h: 0 for h in HYPOTHESES}
+    def simulate_power_at_effect_scaling(scale: float) -> Tuple[float, Dict[str, float]]:
+        sim_rng = random.Random(seed + int(scale * 1000))
+        j_rej = 0
+        p_rej = {h: 0 for h in HYPOTHESES}
+        for _ in range(n_power_sims):
+            all_r = True
+            for hyp_id in HYPOTHESES:
+                mu = thresholds[hyp_id] + scale * (pilot_stats[hyp_id]["mean"] - thresholds[hyp_id])
+                sd = pilot_stats[hyp_id]["sd"]
+                thresh = thresholds[hyp_id]
+                sim_diffs = [sim_rng.gauss(mu, sd) for _ in range(n_required)]
+                sim_mean = sum(sim_diffs) / n_required
+                sim_se = sd / math.sqrt(n_required)
+                reject = (sim_mean - thresh) / sim_se > z_alpha if sim_se > 1e-10 else (sim_mean > thresh)
+                if reject:
+                    p_rej[hyp_id] += 1
+                else:
+                    all_r = False
+            if all_r:
+                j_rej += 1
+        return j_rej / n_power_sims, {h: p_rej[h] / n_power_sims for h in HYPOTHESES}
 
-    for sim in range(n_power_sims):
-        all_reject = True
-        for hyp_id in HYPOTHESES:
-            mu = pilot_stats[hyp_id]["mean"]
-            sd = pilot_stats[hyp_id]["sd"]
-            threshold = thresholds[hyp_id]
-
-            # Simulate n_required paired differences from pilot distribution
-            sim_diffs = [rng.gauss(mu, sd) for _ in range(n_required)]
-            sim_mean = sum(sim_diffs) / n_required
-            sim_se = sd / math.sqrt(n_required)
-
-            # Approximate power using z-test (fast proxy for permutation test)
-            if sim_se > 1e-10:
-                z_stat = (sim_mean - threshold) / sim_se
-                reject = z_stat > z_alpha
-            else:
-                reject = sim_mean > threshold
-
-            if reject:
-                per_hyp_rejections[hyp_id] += 1
-            else:
-                all_reject = False
-
-        if all_reject:
-            joint_rejections += 1
-
-    joint_power = joint_rejections / n_power_sims
-    per_hyp_power = {h: per_hyp_rejections[h] / n_power_sims for h in HYPOTHESES}
+    joint_power, per_hyp_power = simulate_power_at_effect_scaling(1.0)
+    power_75, per_hyp_75 = simulate_power_at_effect_scaling(0.75)
+    power_50, per_hyp_50 = simulate_power_at_effect_scaling(0.50)
 
     # Check if joint power meets target
     power_adequate = joint_power >= target_power
@@ -447,6 +501,11 @@ def compute_sample_size_and_power(
         "joint_power_at_N": round(joint_power, 4),
         "per_hypothesis_power": {h: round(p, 4) for h, p in per_hyp_power.items()},
         "power_adequate": power_adequate,
+        "power_sensitivity_delta_fixed": {
+            "effect_100pct": {"joint_power": round(joint_power, 4), "per_hypothesis": {h: round(p, 4) for h, p in per_hyp_power.items()}},
+            "effect_75pct": {"joint_power": round(power_75, 4), "per_hypothesis": {h: round(p, 4) for h, p in per_hyp_75.items()}},
+            "effect_50pct": {"joint_power": round(power_50, 4), "per_hypothesis": {h: round(p, 4) for h, p in per_hyp_50.items()}}
+        },
         "inconclusive_rule": "If joint power < 0.80 at N_max=60, label non-rejection INCONCLUSIVE, not evidence of no effect" if inconclusive_rule_active else None,
         "n_power_simulations": n_power_sims
     }
@@ -458,29 +517,26 @@ def compute_sample_size_and_power(
 
 def holm_adjustment(p_values: Dict[str, float], alpha: float = 0.05) -> Dict[str, Any]:
     """
-    Apply Holm step-down procedure across the 6 hypotheses.
-    Returns adjusted p-values and rejection decisions.
+    Apply Holm step-down procedure with running max to strictly enforce monotonicity.
+    With tied raw p-values, all tied adjusted values become (m - rank) * raw.
     """
     m = len(p_values)
     sorted_hyps = sorted(p_values.items(), key=lambda x: x[1])
 
     results = {}
-    all_rejected_so_far = True
-
+    run = 0.0
     for rank, (hyp_id, raw_p) in enumerate(sorted_hyps):
-        adjusted_alpha = alpha / (m - rank)
-        reject = all_rejected_so_far and (raw_p <= adjusted_alpha)
-
-        if not reject:
-            all_rejected_so_far = False
-
-        adjusted_p = min(1.0, raw_p * (m - rank))
+        multiplier = m - rank
+        run = max(run, multiplier * raw_p)
+        adj_p = min(1.0, run)
+        adj_alpha = alpha / multiplier
+        reject = raw_p <= adj_alpha
 
         results[hyp_id] = {
-            "raw_p_value": round(raw_p, 6),
+            "raw_p_value": round(raw_p, 8),
             "holm_rank": rank + 1,
-            "holm_adjusted_alpha": round(adjusted_alpha, 6),
-            "holm_adjusted_p": round(adjusted_p, 6),
+            "holm_adjusted_alpha": round(adj_alpha, 6),
+            "holm_adjusted_p": round(adj_p, 8),
             "reject_individual": reject
         }
 
@@ -677,7 +733,7 @@ def assemble_preregistration(
                 "gate_failure": "Do not make claims that depend on that gate"
             },
             "confidence_intervals": {
-                "method": "BCa bootstrap",
+                "method": "Percentile bootstrap",
                 "role": "Descriptive only",
                 "disagreement_rule": "If CI and registered test disagree, apply the pre-registered decision rule"
             }
@@ -727,6 +783,12 @@ def hash_preregistration(prereg: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
+    raise RuntimeError(
+        "Refusing to generate or overwrite a preregistration from synthetic "
+        "pilot draws. Run a separate pilot using the repaired simulator, "
+        "review its outcomes, and write a new versioned manifest."
+    )
+
     print("=================================================================")
     print("    RESCUE-4 STATISTICAL PRE-REGISTRATION ENGINE (PHASE 6)       ")
     print("=================================================================")
@@ -745,9 +807,11 @@ def main():
     try:
         with open("config/rescue_config.v1.0.json", "r") as f:
             config = json.load(f)
-        c_w_entry = [p for p in config["parameter_freeze_ledger"]["provisional_parameters"]
-                     if p["parameter"] == "c_w (stale write weight)"]
-        c_w = c_w_entry[0]["current_provisional_value"] if c_w_entry else 10.0
+        ledger = config.get("parameter_freeze_ledger", {})
+        c_w_entry = [p for p in ledger.get("frozen_in_phase_6", []) if "c_w" in p.get("parameter", "")]
+        if not c_w_entry:
+            c_w_entry = [p for p in ledger.get("provisional_parameters", []) if "c_w" in p.get("parameter", "")]
+        c_w = float(c_w_entry[0].get("value", c_w_entry[0].get("current_provisional_value", 10.0))) if c_w_entry else 10.0
     except (FileNotFoundError, KeyError):
         c_w = 10.0
 
@@ -835,5 +899,99 @@ def main():
     print("=================================================================")
 
 
+def generate_repaired_preregistration() -> Dict[str, Any]:
+    pilot_path = "config/confirmatory_pilot_repaired.json"
+    prereg_path = "config/preregistration_repaired.json"
+    if not os.path.isfile(pilot_path):
+        raise FileNotFoundError(f"simulator pilot results not found: {pilot_path}")
+    if os.path.exists(prereg_path):
+        raise FileExistsError(
+            f"refusing to overwrite existing pre-registration: {prereg_path}"
+        )
+
+    with open(pilot_path, "r", encoding="utf-8") as source:
+        pilot_package = json.load(source)
+    if pilot_package.get("meta", {}).get("status") != "EXPLORATORY_NOT_CONFIRMATORY":
+        raise ValueError("pilot artifact is not marked exploratory")
+
+    records = pilot_package.get("per_seed_records")
+    if not isinstance(records, list) or not records:
+        raise ValueError("pilot artifact contains no per-seed records")
+    pilot_diffs = {
+        hypothesis: [float(record["contrasts"][hypothesis]) for record in records]
+        for hypothesis in HYPOTHESES
+    }
+    if any(len(values) != len(records) for values in pilot_diffs.values()):
+        raise ValueError("pilot contrast records are incomplete")
+
+    with open("config/preregistration_manifest.json", "r", encoding="utf-8") as source:
+        historical_prereg = json.load(source)
+    c_w = float(historical_prereg["frozen_parameters"]["c_w"])
+    p_main = float(pilot_package["meta"]["p_main"])
+    frozen_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    prereg = assemble_preregistration(
+        pilot_diffs,
+        p_main=p_main,
+        c_w=c_w,
+        frozen_at=frozen_at,
+    )
+    prereg["meta"]["status"] = "FROZEN_FROM_SIMULATOR_PILOT"
+    prereg["meta"]["note"] = (
+        "Derived from the attached repaired-simulator exploratory pilot. "
+        "No outcomes from the newly generated confirmatory seed blocks were "
+        "inspected before this freeze."
+    )
+    with open(pilot_path, "rb") as source:
+        pilot_sha256 = hashlib.sha256(source.read()).hexdigest()
+    prereg["pilot_data_provenance"] = {
+        "artifact": pilot_path,
+        "sha256": pilot_sha256,
+        "n_pilot_seeds": len(records),
+        "simulator_sha256": pilot_package["meta"]["simulator_sha256"],
+        "pilot_seed_values": [record["seed_value"] for record in records],
+        "pilot_contrasts": {
+            hypothesis: [round(value, 8) for value in values]
+            for hypothesis, values in pilot_diffs.items()
+        },
+    }
+
+    master_seed = 20261012
+    pilot_seed_values = {
+        record["seed_value"] for record in records
+    } | {
+        record["trace_seed"] for record in records
+    } | {
+        record["fault_draw_seed"] for record in records
+    }
+    while True:
+        seed_manifest = generate_seed_blocks(
+            prereg["power_analysis"]["n_required"], master_seed
+        )
+        confirmatory_seeds = {
+            seed
+            for block in seed_manifest["seed_blocks"]
+            for seed in (
+                block["seed_value"],
+                block["trace_seed"],
+                block["fault_draw_seed"],
+            )
+        }
+        if not pilot_seed_values.intersection(confirmatory_seeds):
+            break
+        master_seed += 1
+    prereg["seed_manifest"] = seed_manifest
+    prereg["meta"]["seed_master"] = master_seed
+
+    prereg["meta"]["sha256_hash"] = hash_preregistration(prereg)
+    with open(prereg_path, "x", encoding="utf-8") as output:
+        json.dump(prereg, output, indent=2)
+    print(f"Frozen repaired pre-registration: {prereg_path}")
+    print(f"Pilot seeds: {len(records)}; confirmatory seeds: {len(seed_manifest['seed_blocks'])}")
+    print(f"delta_OE={prereg['frozen_parameters']['delta_OE']}; "
+          f"delta_C={prereg['frozen_parameters']['delta_C']}")
+    print(f"SHA-256: {prereg['meta']['sha256_hash']}")
+    return prereg
+
+
 if __name__ == "__main__":
-    main()
+    generate_repaired_preregistration()

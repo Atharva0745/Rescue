@@ -1,0 +1,126 @@
+{
+  "meta": {
+    "document": "RESCUE-4 Mock Database Validation Report",
+    "phase": "Phase 8 - Mock Validation Only",
+    "status": "MOCK_VALIDATION_ONLY",
+    "execution_timestamp": "2026-10-12T09:41:03Z",
+    "validation_backend": "IN_MEMORY_MOCK",
+    "live_postgresql_test": false,
+    "exit_gate": "NOT_ESTABLISHED"
+  },
+  "decoder_configuration": {
+    "engine": "PostgreSQL",
+    "version": "16.3",
+    "plugin": "test_decoding",
+    "wal_level": "logical",
+    "decoding_options": {
+      "include-xids": "1",
+      "include-timestamp": "1",
+      "stream-changes": "0",
+      "skip-empty-xacts": "1",
+      "only-local": "0"
+    },
+    "replication_slot": {
+      "slot_name": "rescue_fencing_slot",
+      "plugin": "test_decoding",
+      "slot_type": "logical",
+      "database": "rescue_primary"
+    },
+    "server_settings": {
+      "max_replication_slots": 10,
+      "max_wal_senders": 10,
+      "synchronous_commit": "on",
+      "shared_preload_libraries": []
+    },
+    "tables": {
+      "fence_log": "public.fence_log (gw TEXT, seq BIGINT, inc_new INT, epoch_new INT, created_at TIMESTAMPTZ)",
+      "audit": "public.audit (write_id BIGINT, gw TEXT, inc INT, epoch INT, tx_timestamp TIMESTAMPTZ)",
+      "account_ledger": "public.account_ledger (write_id BIGINT, account_id TEXT, delta NUMERIC, balance NUMERIC)",
+      "resource_registry": "public.resource_registry (write_id BIGINT, resource_id TEXT, status TEXT)"
+    }
+  },
+  "validation_suites": {
+    "suite_1_commit_order_differential": {
+      "test_suite": "Suite 1: Commit-Order Differential",
+      "transactions_evaluated": 10000,
+      "disagreements": 0,
+      "throughput_tx_per_sec": 57152.8,
+      "status": "PASSED"
+    },
+    "suite_2_planted_stale_and_late": {
+      "test_suite": "Suite 2: Planted Stale & Legitimate Late",
+      "planted_stale_trials": 1000,
+      "planted_stale_detected": 1000,
+      "stale_detection_rate": 1.0,
+      "late_completions_tested": 1000,
+      "late_false_positives": 0,
+      "status": "PASSED"
+    },
+    "suite_3_edge_cases": {
+      "test_suite": "Suite 3: Protocol Edge Cases",
+      "edge_cases": {
+        "mixed_transaction": "FLAGGED_AND_REJECTED",
+        "unaudited_bypass": "FLAGGED_AND_REJECTED",
+        "orphan_audit": "FLAGGED_AND_REJECTED",
+        "non_monotone_bump": "FLAGGED_AND_REJECTED",
+        "unknown_gateway": "FLAGGED_AND_REJECTED"
+      },
+      "status": "PASSED"
+    },
+    "suite_4_crash_consistency_and_slot_lag": {
+      "test_suite": "Suite 4: Crash Consistency & Slot Lag",
+      "checkpoint_lsn": 25107511,
+      "replayed_deduplicated": 10,
+      "lagged_txs_caught_up": 20,
+      "status": "PASSED"
+    },
+    "suite_5_decoder_mutants": {
+      "test_suite": "Suite 5: Decoder Mutants M1--M4",
+      "mutants_evaluated": {
+        "M1_STALE_BLIND": "CAUGHT",
+        "M2_LATE_FALSE_POS": "CAUGHT",
+        "M3_MIXED_BLIND": "CAUGHT",
+        "M4_AUDIT_BLIND": "CAUGHT"
+      },
+      "status": "PASSED"
+    },
+    "suite_6_database_preventative_enforcement": {
+      "test_suite": "Suite 6: Database Preventative Safety & Fencing Engine",
+      "test_1_pause_bump_resume": {
+        "status": "PREVENTED",
+        "visible_stale_rows": 0
+      },
+      "test_2_race_lock_serialization": {
+        "status": "PREVENTED",
+        "bump_serialized": true
+      },
+      "test_3_late_begin": {
+        "status": "PREVENTED",
+        "stale_write_aborted": true
+      },
+      "test_4_bypass_protection": {
+        "status": "PREVENTED",
+        "direct_dml_blocked": true
+      },
+      "test_5_fuzz_interleavings": {
+        "status": "PREVENTED",
+        "trials": 10000,
+        "stale_rows_committed": 0
+      },
+      "test_6_detective_control": {
+        "status": "DETECTED",
+        "logical_decoding_flagged": true
+      },
+      "status": "PASSED"
+    }
+  },
+  "enforcement_taxonomy": {
+    "preventative_enforcement": "In-memory model prevented stale commits and direct DML in mock scenarios",
+    "detective_control": "Parser detected invalid mutations in generated test_decoding-like text",
+    "simulation_boundary": "No PostgreSQL server, replication slot, WAL stream, trigger, or concurrent database was exercised"
+  },
+  "gate_c1_equivalent_decision": {
+    "status": "NOT_VERIFIED",
+    "rationale": "The reported checks use generated stream text and an in-memory state manager. They validate parser/model behavior only and do not establish PostgreSQL logical-decoding, transaction, locking, trigger, crash, or concurrency behavior."
+  }
+}
