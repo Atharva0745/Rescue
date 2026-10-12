@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a data-driven report for repaired simulation results."""
+"""Generate a data-driven report for the repaired exploratory simulation."""
 
 import hashlib
 import json
@@ -18,6 +18,9 @@ PILOT_RESULTS_PATH = os.path.join(
 )
 LEGACY_EXPLORATORY_RESULTS_PATH = os.path.join(
     PROJECT_ROOT, "config", "confirmatory_results_repaired_exploratory.json"
+)
+OUTPUT_PATH = os.path.join(
+    PROJECT_ROOT, "config", "technical_report_exploratory.json"
 )
 
 
@@ -48,37 +51,16 @@ def summary(values: List[float]) -> Dict[str, float]:
 
 
 def generate_technical_report() -> Dict[str, Any]:
-    if os.path.isfile(REGISTERED_RESULTS_PATH):
-        results_path = REGISTERED_RESULTS_PATH
-        output_path = os.path.join(
-            PROJECT_ROOT, "config", "technical_report_repaired_confirmatory.json"
-        )
-        expected_status = "COMPLETED_SIMULATION_ONLY"
-        is_registered = True
-    elif os.path.isfile(PILOT_RESULTS_PATH):
-        results_path = PILOT_RESULTS_PATH
-        output_path = os.path.join(
-            PROJECT_ROOT, "config", "technical_report_exploratory.json"
-        )
-        expected_status = "EXPLORATORY_NOT_CONFIRMATORY"
-        is_registered = False
-    elif os.path.isfile(LEGACY_EXPLORATORY_RESULTS_PATH):
-        results_path = LEGACY_EXPLORATORY_RESULTS_PATH
-        output_path = os.path.join(
-            PROJECT_ROOT, "config", "technical_report_exploratory.json"
-        )
-        expected_status = "EXPLORATORY_NOT_CONFIRMATORY"
-        is_registered = False
-    else:
+    if not os.path.isfile(RESULTS_PATH):
         raise FileNotFoundError(
-            "Repaired simulation results are missing; refusing to generate a "
-            "report from the legacy hard-coded artifacts."
+            "Exploratory results are missing; refusing to generate a report "
+            "from the legacy hard-coded confirmatory artifacts."
         )
 
-    with open(results_path, "r", encoding="utf-8") as source:
+    with open(RESULTS_PATH, "r", encoding="utf-8") as source:
         results = json.load(source)
-    if results.get("meta", {}).get("status") != expected_status:
-        raise ValueError(f"report input status must be {expected_status}")
+    if results.get("meta", {}).get("status") != "EXPLORATORY_NOT_CONFIRMATORY":
+        raise ValueError("report input is not explicitly marked exploratory")
 
     records = results.get("per_seed_records")
     if not isinstance(records, list) or not records:
@@ -101,27 +83,13 @@ def generate_technical_report() -> Dict[str, Any]:
 
     report = {
         "meta": {
-            "document": "RESCUE-4 Repaired Simulation Report",
-            "status": expected_status,
+            "document": "RESCUE-4 Exploratory Simulation Report",
+            "status": "EXPLORATORY_NOT_CONFIRMATORY",
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "n_seeds": len(records),
             "interpretation": results["meta"]["interpretation"],
-            "joint_claim_status": (
-                "SUPPORTED_IN_SIMULATOR_ONLY"
-                if results["joint_novelty_claim"]["all_six_reject"] is True
-                else "NOT_SUPPORTED_IN_SIMULATOR"
-                if is_registered
-                else "NOT_ASSESSED"
-            ),
-            "joint_iut_p_value": (
-                max(test["p_value"] for test in results["statistical_tests"].values())
-                if is_registered
-                else None
-            ),
-        },
-        "provenance": {
-            "results_file": os.path.relpath(results_path, PROJECT_ROOT),
-            "results_sha256": file_sha256(results_path),
+            "joint_claim_status": "NOT_ASSESSED",
+        },a256": file_sha256(RESULTS_PATH),
             "simulator_sha256": file_sha256(
                 os.path.join(PROJECT_ROOT, "harness", "confirmatory_simulator.py")
             ),
@@ -137,8 +105,6 @@ def generate_technical_report() -> Dict[str, Any]:
             for arm, metrics in arm_metrics.items()
         },
         "paired_contrast_summaries": results["paired_contrast_summaries"],
-        "statistical_tests": results.get("statistical_tests", {}),
-        "joint_novelty_claim": results["joint_novelty_claim"],
         "fault_sweep": results["fault_sweep_secondary"],
         "database_validation": {
             "status": "NOT_ESTABLISHED_BY_THIS_RERUN",
@@ -149,11 +115,15 @@ def generate_technical_report() -> Dict[str, Any]:
         },
     }
 
-    with open(output_path, "w", encoding="utf-8") as output:
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as output:
         json.dump(report, output, indent=2)
-    print(f"Report written to {os.path.relpath(output_path, PROJECT_ROOT)}")
+    print(f"Exploratory report written to {os.path.relpath(OUTPUT_PATH, PROJECT_ROOT)}")
     return report
 
 
 if __name__ == "__main__":
     generate_technical_report()
+
+        "provenance": {
+            "results_file": os.path.relpath(RESULTS_PATH, PROJECT_ROOT),
+            "results_sh
