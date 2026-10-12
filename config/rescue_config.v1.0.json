@@ -101,15 +101,15 @@
         "type": "CONGESTION_BASED_ADAPTIVE"
       },
       {
-        "id": "D",
-        "name": "DRACO-style Datastore-Aware",
+        "id": "D (DRACO-inspired)",
+        "name": "DRACO-inspired Datastore-Aware Policy",
         "type": "DATASTORE_AWARE_DROPPING",
-        "provisional_label": "DRACO_PENDING_FIDELITY"
+        "label": "DRACO-inspired"
       },
       {
         "id": "B",
         "name": "RESCUE-4 Reservation Policy",
-        "type": "RESERVATION_LEDS"
+        "type": "RESERVATION_LEDGER"
       }
     ],
     "enforcement_levels": [

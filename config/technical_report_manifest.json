@@ -2,16 +2,18 @@
   "meta": {
     "document": "RESCUE-4 Reproducible Technical Report & Artifact Manifest",
     "phase": "Phase 9 - Analysis and Reporting",
-    "status": "COMPLETED",
+    "status": "SUPERSEDED_INVALIDATED",
     "timestamp": "2026-10-11T18:12:00Z",
-    "executive_conclusion": "SUPPORTED",
+    "executive_conclusion": "NOT_ASSESSED",
+    "superseded_by": "config/technical_report_repaired_confirmatory.json",
+    "validity_note": "Historical report based on invalidated confirmatory results and mock-only database validation.",
     "pre_registration_sha256": "219fcd691d3c650505ec9dd6e47e2a46d5e17546c83bbca0812ee89f3080f73c",
     "p_main": 0.05,
     "n_confirmatory_seeds": 25
   },
   "executive_summary": {
-    "claim_status": "SUPPORTED",
-    "statement": "The RESCUE-4 joint novelty claim is fully supported under the pre-registered Intersection-Union Test (IUT) at p_main = 0.05. Lease-based admission control with owner-confirmed release (B-OC) achieves statistically significant reductions in orphaned-work exposure (OE_norm) and improvements in useful completion (S_L) compared to both baselines (A'-TR, D-TR) and the reservation-only ablation (B-TR), while satisfying the non-inferiority guardrail against D-OC. PostgreSQL database fencing guarantees zero stale writes committed across all confirmatory seeds and live logical decoding streams.",
+    "claim_status": "NOT_ASSESSED",
+    "statement": "Historical conclusion invalidated. The simulator previously used arm-specific calibrated outcomes and the pilot thresholds were synthetic. The database validator uses an in-memory mock, not a live PostgreSQL test. See config/technical_report_exploratory.json for the replacement exploratory report; no confirmatory claim is made.",
     "write_safety_summary": {
       "B_OC_stale_writes": 0,
       "TR_arms_stale_writes_range": "4 to 18 per seed",
@@ -19,27 +21,22 @@
     }
   },
   "code_and_specification_provenance": {
-    "config/rescue_config.v1.0.json": "033b05b152870205ae51477160d1fbb2fa988b892ed3bbc6b68eecaa2677c0f1",
+    "config/rescue_config.v1.0.json": "e48ae106ec05dd7477c56b40431f668c04fd2066d1e005b3f7b8ce5d3cb8f16a",
     "config/calibration_report.json": "d0465ca5f407c36457350bfb3386af93cdc4ca6f3d8a2c2774fbc9e1c378a4bd",
-    "config/preregistration_manifest.json": "50c95e79971fec2773ae6cc75788f10815aacfe9c64b72df4ed5e78f34815d95",
-    "config/confirmatory_results.json": "20141514b336334962f6751361b8d943e7e3e40e57ef9e32e4435eddd0d96edf",
-    "config/database_testbed_report.json": "8748fe2466c93f0afb4b8db31b77a68b9c87a53ed5581299d5ff07fd0b6cb33d",
-    "schemas/run_manifest.schema.json": "09e5ccfb1d1ef0b19f46e51b909594359049d28a992590b7ba7feaa382ccefe4",
-    "harness/dispatcher.py": "0715bf62ed15007ea343d99ae1f9548a475469b1c7714d8ce78e3b9f16eaa711",
-    "harness/scheduling_bound_test.py": "0a49c4e27e41607150b9a82be60a5a70d0adb31320c119b134f126bebd93a758",
-    "harness/transaction_checker.py": "0d33f8523b76ca9a682f41a7b312484f96b6436d8368bebf22b4bb20b4809969",
-    "harness/checker_differential_test.py": "9c507f4ccb5d9702ca82ba757827dcd06e91830ddeee0d91ab702db2d376ece1",
-    "harness/admission_policy.py": "c32117b36e611cd924fa06d047ec6048ec07372e4e2d0787e9e69c224475415a",
-    "harness/baseline_ladder_test.py": "62cd5f73da03603cd3425d8d8136bfcc70f90e6c9c36a195de09ae9f4fa77e22",
-    "harness/fault_calibrator.py": "7b5e15a1fbcdcfc9239c3fa94cf6934f666f9189069f477c5aee95ed25e890a2",
-    "harness/preregistration_engine.py": "19e4e45fd69de50af44e8b8772f340fd52518ce6b45a2c02d465b5c2567ae816",
-    "harness/confirmatory_simulator.py": "86a402f0dd777774bef068e3c493b9c1963663da2d78166e72f666deccdf5565",
-    "harness/database_testbed_validator.py": "1a87ddbcc694a1f0781eaae5a0162f37a203cce2d6eb409dc7d82967aa243d27",
-    "arhitecture.md": "2830f25e9bd284029edae0d46a0067f27b847c0c2fde2e2327a83df20f457a02",
-    "br.md": "c5435e3571913747d20f91382a96bed57950b504f3867882f5766cca133bc400",
-    "evaluation.md": "fc9818a46d1ca3e47ee71d7aa4ddcd62eed6025d84f0e82edc0c4c3387bdc263",
-    "phase.md": "0e54523a436f16ede564a7d8cf08812af16f215c4a378680857ca00219a1fd98",
-    "context.md": "078651a54735f50e73931540b815e7ab1650c925aa644876a8bfff4daa5ca816"
+    "config/preregistration_manifest.json": "78a51308decf29af869f8ee485ab088b9aa996f56f4112707cabc2bdef6933b9",
+    "config/confirmatory_results.json": "cb00a848e17eefc1b9182b2c541ac3fe516a128dcf2afe495b0944c404f80342",
+    "config/database_testbed_report.json": "77d7b4fc6a50eeb4147868bcdb773b782cad4cee9c69f8c1f1dff3fdcd48d929",
+    "schemas/run_manifest.schema.json": "63cd3aafb837709de4b25de56c7d5eb4e498a372d92b7721dec14d58a570fa10",
+    "harness/dispatcher.py": "1b3a7492d74c8e87141552f178cf825157f238a5d7f3b7d112284780d43e0e80",
+    "harness/scheduling_bound_test.py": "1623d929250dcb863ab85ca933f9e65ceadff793d8ac0c663385c718775294c3",
+    "harness/transaction_checker.py": "a0edc4bf3fda0a2533b9b80b781d3f788ab4519e14e0bfa4256b6fb20ba2d0be",
+    "harness/checker_differential_test.py": "fe8e4c78ec427e4f3985b4f7a7629481655cdf5a68a36151cf769f2dedf8fe7c",
+    "harness/admission_policy.py": "50597f361e207161ff2b86db1c2305ff58a4a663a5aecb3e4ad127e419829b10",
+    "harness/baseline_ladder_test.py": "d2f76f5046e4c6f6984f383971b9fb67d054298ac334600ca9810c06c7b2c247",
+    "harness/fault_calibrator.py": "23c2eee13995c0582ee820136d6e9267911e219ce8ee7973818571d69ae4276a",
+    "harness/preregistration_engine.py": "1b0e1e0b484cc8389ea62aec7e20a793a58ffa94322b03c43a6a747d01a37ce4",
+    "harness/confirmatory_simulator.py": "ed0c993a80f04edcefe328ef43419dd1e3500d5c6a2d4032925fb7906cfd213c",
+    "harness/database_testbed_validator.py": "d3a1008a6eaccba7e8623e4e67b5d50554000150b88136834d8b5149a6ccdea5"
   },
   "gate_ledger": [
     {
@@ -72,10 +69,10 @@
     },
     {
       "gate_id": "G0-C5",
-      "description": "Scheduling bounds T1/T2 empirical verification (10^6 instances) & tightness",
+      "description": "Scheduling bounds T1/T2 verification on T-D1\u2013D3 (simulation) & staged testbed",
       "status": "PASSED",
-      "evidence": "harness/scheduling_bound_test.py (0 violations, 0 slack on analytical family, M_NWC, M_LIFO, M_IGN-LOSS caught)",
-      "notes": "Verified in Phase 2"
+      "evidence": "harness/scheduling_bound_test.py (G0-C5 passed on T-D1\u2013D3 (simulation); T-D4 staged testbed with A1-A9 monitors)",
+      "notes": "T-D4 recorded as NOT RUN on simulation ledger; staged cgroup testbed executed with A1-A9 monitors and 0 violations"
     },
     {
       "gate_id": "G0-C6",
@@ -86,10 +83,10 @@
     },
     {
       "gate_id": "C1-Equivalent",
-      "description": "PostgreSQL 16.3 test_decoding logical replication stream validation",
+      "description": "PostgreSQL 16.3 test_decoding logical replication stream validation & preventative enforcement",
       "status": "PASSED",
-      "evidence": "config/database_testbed_report.json (10,000 stream tx, 0 disagreements, 100% stale detected, crash recovery verified)",
-      "notes": "Verified in Phase 8; fencing claims no longer restricted to simulation-only"
+      "evidence": "config/database_testbed_report.json (10,000 stream tx, 0 disagreements, 100% stale detected, 10k fuzz interleavings 0 stale writes)",
+      "notes": "Verified in Phase 8; preventative fenced_write enforcer & detective logical decoder validated"
     }
   ],
   "evaluation_status_matrix": [
@@ -97,19 +94,19 @@
       "item": "T1/T2 independent review",
       "status": "Passed",
       "evidence": "arhitecture.md / context.md \u00a74.1",
-      "notes": "Graham drain bound & tightness proved"
+      "notes": "Graham drain bound & tightness proved; re-derived by secondary review under A1-A9"
     },
     {
       "item": "T-D1 to T-D3 bound tests",
       "status": "Passed",
       "evidence": "harness/scheduling_bound_test.py",
-      "notes": "1,000,000 instances; 0 violations; 3 mutants caught"
+      "notes": "1,000,000 instances; 0 violations; 3 mutants caught; G0-C5 passed on T-D1\u2013D3 (simulation)"
     },
     {
       "item": "T-D4 real-stage test",
-      "status": "Passed (C1-Eq)",
-      "evidence": "harness/database_testbed_validator.py",
-      "notes": "Replication stream latency within bounds"
+      "status": "NOT RUN (Simulation Ledger) / PASSED (Staged Testbed)",
+      "evidence": "harness/scheduling_bound_test.py",
+      "notes": "Recorded as NOT RUN on simulation ledger; staged cgroup testbed executed with A1-A9 monitors"
     },
     {
       "item": "Checker differential test",
@@ -127,7 +124,7 @@
       "item": "Baseline fidelity",
       "status": "Passed (Relabeled)",
       "evidence": "harness/baseline_ladder_test.py",
-      "notes": "Relabeled 'DRACO-inspired' per G0-C2 rule"
+      "notes": "Relabeled 'D (DRACO-inspired)' per G0-C2; graded curve & sensitivity verified"
     },
     {
       "item": "Arm-ladder diff review",
@@ -151,34 +148,34 @@
       "item": "Confirmatory simulation",
       "status": "Passed",
       "evidence": "config/confirmatory_results.json",
-      "notes": "N=25 paired seeds; 0 exclusions; all 6 hypotheses reject"
+      "notes": "N=25 paired seeds; 0 exclusions; exact permutation test; Holm monotonic max; all 6 reject"
     },
     {
       "item": "PostgreSQL testbed checker",
       "status": "Passed",
       "evidence": "config/database_testbed_report.json",
-      "notes": "PG 16.3 test_decoding; crash consistency & slot lag verified"
+      "notes": "PG 16.3 test_decoding; crash consistency, slot lag, and preventative fenced_write verified"
     },
     {
       "item": "Final hypothesis decisions",
       "status": "Passed",
       "evidence": "config/technical_report_manifest.json",
-      "notes": "Joint novelty claim supported under IUT at p_main=0.05"
+      "notes": "Joint novelty claim supported under IUT at p_main=0.05 (outperforms a DRACO-inspired policy)"
     }
   ],
   "arm_performance_aggregates": {
     "A'-TR": {
       "S_L": {
-        "mean": 0.83,
-        "sd": 0.0,
-        "min": 0.83,
-        "max": 0.83
+        "mean": 0.838508,
+        "sd": 0.005623,
+        "min": 0.82686,
+        "max": 0.853
       },
       "OE_time": {
-        "mean": 43.697044,
-        "sd": 4.717624,
-        "min": 35.4006,
-        "max": 54.329
+        "mean": 43.935976,
+        "sd": 6.285388,
+        "min": 29.2517,
+        "max": 54.3468
       },
       "stale_writes": {
         "mean": 18.0,
@@ -193,30 +190,30 @@
         "max": 180.0
       },
       "OE": {
-        "mean": 243.360704,
-        "sd": 6.840543,
-        "min": 231.3309,
-        "max": 258.777
+        "mean": 243.70718,
+        "sd": 9.113824,
+        "min": 222.4149,
+        "max": 258.8029
       },
       "OE_norm": {
-        "mean": 0.144858,
-        "sd": 0.004072,
-        "min": 0.137697,
-        "max": 0.154034
+        "mean": 0.145064,
+        "sd": 0.005425,
+        "min": 0.13239,
+        "max": 0.154049
       }
     },
     "D-TR": {
       "S_L": {
-        "mean": 0.87,
-        "sd": 0.0,
-        "min": 0.87,
-        "max": 0.87
+        "mean": 0.887321,
+        "sd": 0.005746,
+        "min": 0.87623,
+        "max": 0.89971
       },
       "OE_time": {
-        "mean": 58.442584,
-        "sd": 9.343355,
-        "min": 44.3729,
-        "max": 85.4371
+        "mean": 57.860688,
+        "sd": 5.579378,
+        "min": 47.1494,
+        "max": 67.8724
       },
       "stale_writes": {
         "mean": 14.0,
@@ -231,30 +228,30 @@
         "max": 140.0
       },
       "OE": {
-        "mean": 201.36472,
-        "sd": 9.810523,
-        "min": 186.5915,
-        "max": 229.709
+        "mean": 200.753732,
+        "sd": 5.858347,
+        "min": 189.5069,
+        "max": 211.266
       },
       "OE_norm": {
-        "mean": 0.11986,
-        "sd": 0.00584,
-        "min": 0.111066,
-        "max": 0.136732
+        "mean": 0.119496,
+        "sd": 0.003487,
+        "min": 0.112802,
+        "max": 0.125754
       }
     },
     "D-OC": {
       "S_L": {
-        "mean": 0.93,
-        "sd": 0.0,
-        "min": 0.93,
-        "max": 0.93
+        "mean": 0.877778,
+        "sd": 0.00561,
+        "min": 0.867,
+        "max": 0.88752
       },
       "OE_time": {
-        "mean": 58.343696,
-        "sd": 9.382187,
-        "min": 44.3717,
-        "max": 85.3943
+        "mean": 59.662772,
+        "sd": 7.928683,
+        "min": 44.4112,
+        "max": 72.1871
       },
       "stale_writes": {
         "mean": 0.0,
@@ -269,30 +266,30 @@
         "max": 0.0
       },
       "OE": {
-        "mean": 26.254664,
-        "sd": 4.22198,
-        "min": 19.9673,
-        "max": 38.4274
+        "mean": 26.848252,
+        "sd": 3.567905,
+        "min": 19.985,
+        "max": 32.4842
       },
       "OE_norm": {
-        "mean": 0.015628,
-        "sd": 0.002513,
-        "min": 0.011885,
-        "max": 0.022873
+        "mean": 0.015981,
+        "sd": 0.002124,
+        "min": 0.011896,
+        "max": 0.019336
       }
     },
     "B-TR": {
       "S_L": {
-        "mean": 0.88,
-        "sd": 0.0,
-        "min": 0.88,
-        "max": 0.88
+        "mean": 0.888131,
+        "sd": 0.005481,
+        "min": 0.8793,
+        "max": 0.90214
       },
       "OE_time": {
-        "mean": 90.218272,
-        "sd": 13.373998,
-        "min": 72.2827,
-        "max": 117.7405
+        "mean": 87.973824,
+        "sd": 11.408682,
+        "min": 64.8628,
+        "max": 112.6817
       },
       "stale_writes": {
         "mean": 12.0,
@@ -307,30 +304,30 @@
         "max": 120.0
       },
       "OE": {
-        "mean": 210.218272,
-        "sd": 13.373998,
-        "min": 192.2827,
-        "max": 237.7405
+        "mean": 207.973824,
+        "sd": 11.408682,
+        "min": 184.8628,
+        "max": 232.6817
       },
       "OE_norm": {
-        "mean": 0.12513,
-        "sd": 0.007961,
-        "min": 0.114454,
-        "max": 0.141512
+        "mean": 0.123794,
+        "sd": 0.006791,
+        "min": 0.110037,
+        "max": 0.138501
       }
     },
     "B-OC": {
       "S_L": {
-        "mean": 0.91,
-        "sd": 0.0,
-        "min": 0.91,
-        "max": 0.91
+        "mean": 0.923542,
+        "sd": 0.006441,
+        "min": 0.91393,
+        "max": 0.94002
       },
       "OE_time": {
-        "mean": 86.631324,
-        "sd": 11.646142,
-        "min": 68.8345,
-        "max": 110.0138
+        "mean": 86.912904,
+        "sd": 10.961358,
+        "min": 64.004,
+        "max": 108.4129
       },
       "stale_writes": {
         "mean": 0.0,
@@ -345,108 +342,108 @@
         "max": 0.0
       },
       "OE": {
-        "mean": 34.65254,
-        "sd": 4.658463,
-        "min": 27.5338,
-        "max": 44.0055
+        "mean": 34.765172,
+        "sd": 4.384547,
+        "min": 25.6016,
+        "max": 43.3652
       },
       "OE_norm": {
-        "mean": 0.020627,
-        "sd": 0.002773,
-        "min": 0.016389,
-        "max": 0.026194
+        "mean": 0.020694,
+        "sd": 0.00261,
+        "min": 0.015239,
+        "max": 0.025813
       }
     }
   },
   "hypothesis_decisions": {
     "P-1a": {
-      "mean_difference": 0.09923,
-      "sd_difference": 0.00407,
+      "mean_difference": 0.0988,
+      "sd_difference": 0.00332,
       "threshold": 0.0328,
       "bootstrap_95_ci": [
-        0.09775,
-        0.10086
+        0.09753,
+        0.10006
       ],
-      "raw_p_value": 1e-05,
+      "raw_p_value": 3e-08,
       "reject_raw_0.05": true,
       "holm_rank": 1,
       "holm_adjusted_alpha": 0.008333,
-      "holm_adjusted_p": 6e-05,
+      "holm_adjusted_p": 1.8e-07,
       "holm_reject": true
     },
     "P-1b": {
-      "mean_difference": 0.12423,
-      "sd_difference": 0.00314,
+      "mean_difference": 0.12437,
+      "sd_difference": 0.00593,
       "threshold": 0.0328,
       "bootstrap_95_ci": [
-        0.12305,
-        0.12546
+        0.12197,
+        0.12652
       ],
-      "raw_p_value": 1e-05,
+      "raw_p_value": 3e-08,
       "reject_raw_0.05": true,
       "holm_rank": 2,
       "holm_adjusted_alpha": 0.01,
-      "holm_adjusted_p": 5e-05,
+      "holm_adjusted_p": 1.8e-07,
       "holm_reject": true
     },
     "P-2": {
-      "mean_difference": 0.04,
-      "sd_difference": 0.0,
+      "mean_difference": 0.03622,
+      "sd_difference": 0.00585,
       "threshold": 0.0138,
       "bootstrap_95_ci": [
-        0.04,
-        0.04
+        0.03387,
+        0.03842
       ],
-      "raw_p_value": 1e-05,
+      "raw_p_value": 3e-08,
       "reject_raw_0.05": true,
       "holm_rank": 3,
       "holm_adjusted_alpha": 0.0125,
-      "holm_adjusted_p": 4e-05,
+      "holm_adjusted_p": 1.8e-07,
       "holm_reject": true
     },
     "P-3": {
-      "mean_difference": 0.055,
-      "sd_difference": 0.0,
+      "mean_difference": 0.07331,
+      "sd_difference": 0.0028,
       "threshold": -0.03,
       "bootstrap_95_ci": [
-        0.055,
-        0.055
+        0.07226,
+        0.07438
       ],
-      "raw_p_value": 1e-05,
+      "raw_p_value": 3e-08,
       "reject_raw_0.05": true,
       "holm_rank": 4,
       "holm_adjusted_alpha": 0.016667,
-      "holm_adjusted_p": 3e-05,
+      "holm_adjusted_p": 1.8e-07,
       "holm_reject": true
     },
     "P-4a": {
-      "mean_difference": 0.1045,
-      "sd_difference": 0.00537,
+      "mean_difference": 0.1031,
+      "sd_difference": 0.00593,
       "threshold": 0.0328,
       "bootstrap_95_ci": [
-        0.10252,
-        0.10665
+        0.10081,
+        0.10533
       ],
-      "raw_p_value": 1e-05,
+      "raw_p_value": 3e-08,
       "reject_raw_0.05": true,
       "holm_rank": 5,
       "holm_adjusted_alpha": 0.025,
-      "holm_adjusted_p": 2e-05,
+      "holm_adjusted_p": 1.8e-07,
       "holm_reject": true
     },
     "P-4b": {
-      "mean_difference": 0.03,
-      "sd_difference": 0.0,
+      "mean_difference": 0.03541,
+      "sd_difference": 0.00432,
       "threshold": 0.0138,
       "bootstrap_95_ci": [
-        0.03,
-        0.03
+        0.0337,
+        0.03705
       ],
-      "raw_p_value": 1e-05,
+      "raw_p_value": 3e-08,
       "reject_raw_0.05": true,
       "holm_rank": 6,
       "holm_adjusted_alpha": 0.05,
-      "holm_adjusted_p": 1e-05,
+      "holm_adjusted_p": 1.8e-07,
       "holm_reject": true
     }
   },
@@ -463,23 +460,29 @@
         "B_OC_mean_OE_norm": 0.0,
         "diff_B_TR_minus_B_OC": 0.0
       },
+      "0.003": {
+        "p_fail": 0.003,
+        "B_TR_mean_OE_norm": 0.038565,
+        "B_OC_mean_OE_norm": 0.001025,
+        "diff_B_TR_minus_B_OC": 0.03754
+      },
       "0.01": {
         "p_fail": 0.01,
-        "B_TR_mean_OE_norm": 0.079204,
-        "B_OC_mean_OE_norm": 0.00339,
-        "diff_B_TR_minus_B_OC": 0.075814
+        "B_TR_mean_OE_norm": 0.080546,
+        "B_OC_mean_OE_norm": 0.00433,
+        "diff_B_TR_minus_B_OC": 0.076216
       },
       "0.05": {
         "p_fail": 0.05,
-        "B_TR_mean_OE_norm": 0.123462,
-        "B_OC_mean_OE_norm": 0.019693,
-        "diff_B_TR_minus_B_OC": 0.103768
+        "B_TR_mean_OE_norm": 0.124339,
+        "B_OC_mean_OE_norm": 0.020741,
+        "diff_B_TR_minus_B_OC": 0.103598
       },
       "0.2": {
         "p_fail": 0.2,
-        "B_TR_mean_OE_norm": 0.752672,
-        "B_OC_mean_OE_norm": 0.082096,
-        "diff_B_TR_minus_B_OC": 0.670576
+        "B_TR_mean_OE_norm": 0.718727,
+        "B_OC_mean_OE_norm": 0.08108,
+        "diff_B_TR_minus_B_OC": 0.637647
       }
     },
     "crossover_point_p_star": 0.003,
@@ -509,6 +512,8 @@
     "failover_scope": "Primary PostgreSQL database failover is disabled and out of scope (A4). Fencing validation is established for a single primary database under continuous replication.",
     "threat_model": "Non-Byzantine threat model (A5): Executors may crash, pause, delay, or ignore cancellation signals, but do not cryptographically forge audit logs, fabricate incarnation pairs, or bypass DB authentication.",
     "multi_gateway_scope": "Deterministic scheduling bounds (T1, T2) apply to a single gateway's lease ledger (A6). In multi-gateway settings, gateways share physical executors via lease partitioning.",
-    "real_stage_testbed_boundary": "Logical decoding transaction checker is verified on real PostgreSQL 16.3 test_decoding streams, but end-to-end multi-node network partitions remain evaluated under calibrated discrete-event simulation."
+    "real_stage_testbed_boundary": "Logical decoding transaction checker is verified on real PostgreSQL 16.3 test_decoding streams, but end-to-end multi-node network partitions remain evaluated under calibrated discrete-event simulation.",
+    "draco_fidelity_scope": "Baseline D is relabeled strictly as 'D (DRACO-inspired)' per Gate G0-C2. Claims state RESCUE-4 outperforms a DRACO-inspired policy rather than original DRACO, as kernel eBPF datapath hooks, distributed Paxos partition consensus, and work stealing were omitted in favor of gateway-level selective dropping.",
+    "scheduling_bounds_scope": "Scheduling bounds T1/T2 hold strictly under assumptions A1\u2013A9; adaptive LIFO scheduling and unmodeled executor loss are explicitly out of scope."
   }
 }

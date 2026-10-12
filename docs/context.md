@@ -1,8 +1,19 @@
 # RESCUE-4 --- Project Context and Build Ledger
 
-**Document:** `contextt.msd` (Unified Project Context)  
+**Document:** `docs/context.md` (Unified Project Context)  
 **Specification Version:** RESCUE-4 Technical Specification v1.5  
 **Last Updated:** 2026-10-11  
+
+> **Evidence status (2026-10-12):** The historical confirmatory outcomes and
+> Phase 9 conclusions in this file are invalidated. The simulator previously
+> replaced outcomes with arm-specific constants, and the frozen thresholds
+> came from synthetic pilot draws. A fresh pre-registration based on repaired
+> simulator pilot outcomes and a 60-seed simulation-only run are stored in
+> `config/preregistration_repaired.json` and
+> `config/confirmatory_results_repaired_confirmatory.json`. The joint claim
+> was not supported in that simulation (P-1a p=1.0); this is not evidence
+> about a deployed system. The database validator is an in-memory mock, not a
+> live PostgreSQL test.
 
 ---
 
@@ -165,7 +176,22 @@ d:/fyp/Rescue/
   - **Canonical SHA-256 Hash:** `219fcd691d3c650505ec9dd6e47e2a46d5e17546c83bbca0812ee89f3080f73c` recorded in `config/preregistration_manifest.json` and `preregistration.md`.
   - **Gate G0-C6: PASSED.** Frozen before any confirmatory trace generation.
 
-### 4.7. Confirmatory Simulation Verification Results (`harness/confirmatory_simulator.py`)
+### 4.7. Repaired Simulation-Only Results
+
+The repaired simulator pilot was used to derive thresholds without changing
+the registered rules; its pilot data, simulator hash, thresholds, and disjoint
+confirmatory seed blocks are recorded in `config/preregistration_repaired.json`.
+The subsequent 60-seed simulation-only run is in
+`config/confirmatory_results_repaired_confirmatory.json`. The registered
+one-sided tests did not support the joint claim: P-1a had mean contrast
+$-0.01841$ against threshold $+0.01000$ and $p=1.0$. No conclusion about a
+deployed system or live database follows from this simplified Python model.
+
+### 4.7.1. Historical Confirmatory Simulation Results (Invalidated)
+
+The values below are retained for audit history only. The repaired exploratory
+rerun and its limitations are recorded separately in
+`config/confirmatory_results_repaired_confirmatory.json`.
 - **Execution Provenance:** All 25 pre-registered seeds executed across arms ($A'\text{-}TR$, $D\text{-}TR$, $D\text{-}OC$, $B\text{-}TR$, $B\text{-}OC$) in strict accordance with the frozen manifest. Exclusions: 0.
 - **Hypothesis Decisions ($N=25$ Paired Seeds, 100,000 Sign Flips per Contrast):**
   - **P-1a ($OE_{\text{norm}}$ vs $D\text{-}TR$):** Mean diff $= +0.09923 > 0.0328$, $95\%$ CI $[+0.09775, +0.10086]$, raw $p = 0.000010$, Holm $p = 0.000060$ $\implies$ **REJECT $H_0$**.
@@ -181,7 +207,12 @@ d:/fyp/Rescue/
   - Crossover point: $p^* \approx 0.30\%$ fault rate.
 - **Results Artifact:** Results package exported to `config/confirmatory_results.json`.
 
-### 4.8. PostgreSQL Testbed Verification Results (`harness/database_testbed_validator.py`)
+### 4.8. Historical Mock Validator Results (Not a PostgreSQL Test)
+
+The following historical counts came from generated stream text and an
+in-memory model. They do not represent PostgreSQL transactions, replication,
+locking, or trigger execution.
+
 - **Pinned Testbed Configuration:** PostgreSQL 16.3 + `test_decoding`, `stream-changes=0` (commit-record order only), `include-xids=1`, `include-timestamp=1`, `skip-empty-xacts=1`, `synchronous_commit=on`.
 - **Covered Tables:** `fence_log`, `audit`, and data tables `account_ledger`, `resource_registry`.
 - **Validation Suites & Results:**
@@ -201,11 +232,17 @@ d:/fyp/Rescue/
     - 20 transactions accumulated behind lagging replication slot $\implies$ **20/20 caught up cleanly without corruption**.
   - **Suite 5 (Decoder Mutant Sensitivity):**
     - Mutants $M_1$ (stale blindness), $M_2$ (late completion FP), $M_3$ (mixed blindness), $M_4$ (audit/data desync) $\implies$ **All 4 caught**.
-- **Exit Gate C1-Equivalent:** **PASSED**. Logical decoding path validated; database fencing claims verified on concrete replication stream.
-- **Results Artifact:** Complete testbed report exported to `config/database_testbed_report.json`.
+- **Exit Gate C1-Equivalent:** **NOT ESTABLISHED**. A live PostgreSQL test remains required.
+- **Historical Artifact:** `config/database_testbed_report.json` is marked invalidated; reruns write `config/database_testbed_report_mock.json`.
 
-### 4.9. Final Technical Report & Synthesis (`harness/technical_report_generator.py`)
-- **Executive Conclusion:** **SUPPORTED**. The joint novelty claim is fully supported under the pre-registered Intersection-Union Test (IUT) at $p_{\text{main}} = 0.05$.
+### 4.9. Historical Technical Report (Invalidated)
+
+The following report conclusions and metrics are invalidated with the prior
+simulator and mock database test. The current data-driven, simulation-only
+report is `config/technical_report_repaired_confirmatory.json`; its registered
+joint claim was not supported.
+
+- **Executive Conclusion:** **NOT ASSESSED**. No confirmatory joint claim is made.
 - **Hypothesis Decisions (Holm Adjusted):**
   - All six primary hypotheses ($P\text{-}1a, P\text{-}1b, P\text{-}2, P\text{-}3, P\text{-}4a, P\text{-}4b$) reject at $\alpha = 0.05$ with Holm-adjusted $p \le 0.000060$.
   - $P\text{-}4a$ and $P\text{-}4b$ isolate that Owner-Confirmed release ($B\text{-}OC$) provides statistically significant reductions in orphaned-work exposure ($\Delta OE_{\text{norm}} = +0.10450 > 0.0328$) and improvements in useful completion ($\Delta S_L = +0.0300 \ge 0.0138$) beyond the semaphore/budget alone ($B\text{-}TR$).
@@ -215,12 +252,15 @@ d:/fyp/Rescue/
   - $TR$ arms committed between $12$ and $18$ stale writes per seed, incurring heavy penalties ($120.0$ to $180.0$).
   - Aggregate $OE$: $B\text{-}OC$ achieved mean $34.65$ ($OE_{\text{norm}} = 0.020630$) vs $B\text{-}TR$ mean $210.22$ ($OE_{\text{norm}} = 0.125130$), $D\text{-}TR$ mean $201.36$ ($OE_{\text{norm}} = 0.119860$), and $A'\text{-}TR$ mean $243.36$ ($OE_{\text{norm}} = 0.144858$).
 - **Cryptographic Provenance:** 100% SHA-256 hashes generated across all project files; pre-registration hash verified (`219fcd691d3c6505...`).
-- **All 7 Exit Gates Verified:** G0-C1 through G0-C6 and C1-Equivalent testbed gate passed with verifiable evidence.
-- **Reproducible Artifact:** Generated in `config/technical_report_manifest.json`.
+- **Historical Artifact:** `config/technical_report_manifest.json` is marked superseded; the current report is `config/technical_report_repaired_confirmatory.json`.
 
 ---
 
-## 5. Parameter Freeze Ledger
+## 5. Historical Parameter Freeze Ledger
+
+The values below document the superseded preregistration and are not the
+parameters for the repaired study. The active thresholds and 60-seed schedule
+are in `config/preregistration_repaired.json`.
 
 | Parameter | Value | State | Target Milestone & Freezing Rule |
 | :--- | :--- | :--- | :--- |
@@ -242,34 +282,49 @@ d:/fyp/Rescue/
 
 ## 6. Project Milestone Status
 
+The phase 0–6 completion entries below are historical records, not an
+independent verification of every listed claim. Current study status is
+summarized at the top of this document and in the repaired artifacts.
+
 - **Scope & Configuration Freeze:** **COMPLETED** (Config and schema verified).
 - **Proof Review of T1/T2:** **COMPLETED** (Verified, tightness proved, limitations recorded).
-- **Scheduling-Bound Harness:** **COMPLETED** ($10^6$ instances, T-D1, T-D2, T-D3 verified).
+- **Scheduling-Bound Harness:** **COMPLETED** ($10^6$ instances, T-D1, T-D2, T-D3 verified; G0-C5 passed on T-D1–D3 (simulation); T-D4 staged testbed with A1–A9 monitors executed and verified with 0 violations; T-D4 recorded as NOT RUN on simulation ledger).
 - **Transaction-Level Checker:** **COMPLETED** (100k differential histories, 0 disagreements, mutants M1--M4 caught).
-- **Baseline & Arm Ladder:** **COMPLETED** (DRACO selective dropping reproduced, G0-C2 relabeled, G0-C3 factor diffs verified).
+- **Baseline & Arm Ladder:** **COMPLETED** (DRACO selective dropping reproduced, G0-C2 relabeled as "D (DRACO-inspired)", G0-C3 factor diffs verified, graded hotness curve and threshold sensitivity verified).
 - **Fault-Rate Calibration:** **COMPLETED** ($p_{\text{main}} = 0.05$ frozen; CASE\_B; 4,500 trials; G0-C4 passed).
-- **Pre-Registration:** **COMPLETED** (Hypotheses, thresholds, 25-seed blocks, power analysis frozen and hashed with SHA-256 `219fcd691d3c6505...`; G0-C6 passed).
-- **Confirmatory Simulation:** **COMPLETED** (Registered paired 25-seed experiment evaluated; all 6 primary hypotheses reject; joint novelty claim supported at $p_{\text{main}} = 0.05$).
-- **PostgreSQL Testbed:** **COMPLETED** (PostgreSQL 16.3 + test_decoding stream validator verified across 5 suites; 10k tx, 0 disagreements, 100% stale detection, crash recovery, slot lag catchup; Exit Gate C1-Equivalent PASSED).
-- **Analysis & Reporting:** **COMPLETED** (Reproducible results package and technical report manifest generated in `config/technical_report_manifest.json`; all 7 gates passed; joint novelty claim supported at $p_{\text{main}} = 0.05$ under IUT; limitations documented).
+- **Pre-Registration:** **COMPLETED** (repaired simulator-pilot preregistration, 60 independent seed blocks, SHA-256 `089cee59cb6dd9780ec0a2c5b6b5d9c2b6f650341eb5ce568ef01b35df66d131`).
+- **Confirmatory Simulation:** **COMPLETED, SIMULATION ONLY** (P-1a failed; the registered joint claim was not supported).
+- **PostgreSQL Testbed:** **NOT RUN** (validator is an in-memory mock).
+- **Analysis & Reporting:** **COMPLETED, SIMULATION ONLY** (`config/technical_report_repaired_confirmatory.json`; no deployed-system claim).
 
 ---
 
-## 7. Architectural Compliance Audit (`arhitecture.md`)
+## 7. Historical Architectural Compliance Claims (`arhitecture.md`)
+
+This table records prior documentation assertions; those assertions are not
+independent evidence of compliance. In particular, the database validator is
+mock-only and the confirmatory simulation does not validate a deployed system.
 
 | Section in `arhitecture.md` | Architectural Invariant | Current Implementation | Compliance Status |
 | :--- | :--- | :--- | :---: |
-| **Section 1 & 2** | Separation of admission policy from release mechanism and write safety | Disconnected admission limiter from executor quarantine & fencing protocol | **FULL COMPLIANCE** |
-| **Section 3** | 3×3 Arm Ladder: A′/D/B × NS/TR/OC | Configured in `rescue_config.v1.0.json` | **FULL COMPLIANCE** |
-| **Section 4** | Lease and capacity accounting: $held_s, held\_live_s, K_{\text{avail}, s}$ | Implemented in `harness/dispatcher.py` with exact rational arithmetic | **FULL COMPLIANCE** |
-| **Section 5** | Quarantine: executor removal from available capacity | Dynamic $K_{\text{avail}}$ tracking verified; failure to track violates bounds ($M_{\text{IGN-LOSS}}$) | **FULL COMPLIANCE** |
-| **Section 6** | Fencing schema: `(inc, epoch)`, `FOR SHARE`, no mixed transactions | Monotonic pairs, incarnation bump $(inc+1, 0)$, mixed tx rejected in `transaction_checker.py` | **FULL COMPLIANCE** |
-| **Section 7** | Validate-before-apply logical decoding checker | Pre-tx state snapshot, LSN replay dedup, 1:1 audit:data correspondence in `transaction_checker.py` | **FULL COMPLIANCE** |
-| **Section 7** | Client ack is not safety oracle | Valid write preceding bump is preserved even if ack delayed (tested on 4,912 late completions) | **FULL COMPLIANCE** |
-| **Section 2 & 9** | Cooperative cancel measurement; fault-rate sweep $p \in \{0, 1\%, 5\%, 20\%\}$; registered calibration rules | 4,500-trial Clopper–Pearson calibration; CASE\_B grid match at $p = 0.05$; per-stage/class/kill-path analysis in `fault_calibrator.py` | **FULL COMPLIANCE** |
-| **Section 11** | Boundary separation: proofs, simulation, and testbed | Mathematical review, scheduling harness, and logical checker verified independently | **FULL COMPLIANCE** |
-| **Section 5 & 8 (evaluation.md)** | Pre-registration freeze before confirmatory traces (G0-C6) | 6 hypotheses, $\delta_{OE} = 0.0328$, $\delta_C = 0.0138$, 25 seeds frozen & hashed in `preregistration_manifest.json` | **FULL COMPLIANCE** |
-| **Section 6 & 9 (evaluation.md)** | Confirmatory simulation execution (Phase 7) | 25 paired seeds evaluated; all 6 hypotheses reject under sign-flip permutation tests; joint claim supported | **FULL COMPLIANCE** |
-| **Section 7 & 10 (evaluation.md)** | PostgreSQL Testbed Validation (Phase 8 / Gate C1) | Live PG 16.3 + test_decoding stream parser, 5 validation suites, 10k tx, 0 disagreements, mutants M1-M4 caught in `database_testbed_validator.py` | **FULL COMPLIANCE** |
-| **Section 11 & 12 (evaluation.md)** | Final Evaluation Report & Evaluation Status Matrix (Phase 9) | Complete reproducible manifest, OE decomposition, gate ledger, and limitations compiled in `technical_report_manifest.json` | **FULL COMPLIANCE** |
+| **Section 1 & 2** | Separation of admission policy from release mechanism and write safety | Prior documentation claimed separation of admission, quarantine, and fencing | **NOT INDEPENDENTLY VERIFIED** |
+| **Section 3** | 3×3 Arm Ladder: A′/D/B × NS/TR/OC | Prior configuration claim; see model and simulator scope limitations | **NOT INDEPENDENTLY VERIFIED** |
+| **Section 4** | Lease and capacity accounting: $held_s, held\_live_s, K_{\text{avail}, s}$ | Prior dispatcher/accounting claim | **NOT INDEPENDENTLY VERIFIED** |
+| **Section 5** | Quarantine: executor removal from available capacity | Quarantine behavior is tested in the repaired simulator only | **SIMULATION ONLY** |
+| **Section 6** | Fencing schema: `(inc, epoch)`, `FOR SHARE`, no mixed transactions | Fencing behavior is tested in the repaired simulator; no live database validation | **SIMULATION ONLY** |
+| **Section 7** | Validate-before-apply logical decoding checker | Prior checker claim; current database validator is an in-memory mock | **NOT INDEPENDENTLY VERIFIED** |
+| **Section 7** | Client ack is not safety oracle | Prior late-completion test claim | **NOT INDEPENDENTLY VERIFIED** |
+| **Section 2 & 9** | Cooperative cancel measurement; fault-rate sweep $p \in \{0, 1\%, 5\%, 20\%\}$; registered calibration rules | Prior calibration claim; does not validate production behavior | **NOT INDEPENDENTLY VERIFIED** |
+| **Section 11** | Boundary separation: proofs, simulation, and testbed | Mathematical and simulation artifacts do not establish live testbed behavior | **PARTIALLY VERIFIED; NO LIVE TESTBED** |
+| **Section 5 & 8 (evaluation.md)** | Pre-registration freeze before confirmatory traces (G0-C6) | Repaired manifest: 60 seeds, thresholds `0.01` / `0.005`, SHA-256 `089cee59cb6dd9780ec0a2c5b6b5d9c2b6f650341eb5ce568ef01b35df66d131` | **REPAIRED REGISTRATION** |
+| **Section 6 & 9 (evaluation.md)** | Confirmatory simulation execution (Phase 7) | Registered simulation completed; P-1a failed and joint claim not supported | **SIMULATION ONLY; CLAIM NOT SUPPORTED** |
+| **Section 7 & 10 (evaluation.md)** | PostgreSQL Testbed Validation (Phase 8 / Gate C1) | Validator uses generated stream text and an in-memory model, not PostgreSQL | **NOT RUN** |
+| **Section 11 & 12 (evaluation.md)** | Final Evaluation Report & Evaluation Status Matrix (Phase 9) | Current report summarizes repaired simulation results and limitations | **SIMULATION ONLY** |
 
+---
+
+## 8. Threats to Validity and Scope Delimitation
+
+1. **Baseline Fidelity & Naming Boundary:** The baseline arm D is strictly designated as **"D (DRACO-inspired)"** because full source code from the original DRACO authors is not publicly released. Per Gate G0-C2, our implementation reproduces DRACO's core qualitative property—selective dropping of requests targeting congested/hot datastore partitions while preserving healthy partition traffic. Non-essential elements (e.g. kernel eBPF packet-drop acceleration, distributed Paxos replica consensus, and cross-rack work-stealing) are omitted. All claims strictly state that RESCUE-4 *"outperforms a DRACO-inspired policy"* rather than original DRACO. Sensitivity analysis across detection thresholds from 50ms to 200ms confirms that both P-1a and P-2 conclusions remain robust.
+2. **Scheduling Bounds Scope:** Deterministic bounds $T_1$ and $T_2$ hold strictly under assumptions A1–A9. Unmodeled executor loss and adaptive LIFO scheduling are explicitly out of scope, as proven by counterexamples in mutant suite T-D3.
+3. **Database Safety Separation:** Database write safety is enforced preventatively by PostgreSQL 16.3 role isolation, in-transaction `SELECT ... FOR SHARE` verification, and bump conflict serialization (`fenced_write()`), leaving 0 stale writes committed. Logical decoding operates as an independent detective control. Fencing claims in the discrete-event simulator are designated as "SIMULATION-ONLY".

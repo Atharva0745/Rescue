@@ -50,7 +50,7 @@
       "direction": "superiority",
       "workload": "W3",
       "fault_cell": "p_main",
-      "purpose": "Test OE improvement over the strengthened D baseline"
+      "purpose": "Test OE improvement over the strengthened D (DRACO-inspired) baseline; outperforms a DRACO-inspired policy"
     },
     "P-1b": {
       "id": "P-1b",
@@ -76,7 +76,7 @@
       "direction": "superiority",
       "workload": "W3",
       "fault_cell": "p_main",
-      "purpose": "Test legitimate-request success improvement"
+      "purpose": "Test legitimate-request success improvement over D (DRACO-inspired); outperforms a DRACO-inspired policy"
     },
     "P-3": {
       "id": "P-3",
@@ -89,7 +89,7 @@
       "direction": "non-inferiority",
       "workload": "W1",
       "fault_cell": "alpha_0_no_attack",
-      "purpose": "Test the no-attack non-inferiority guardrail",
+      "purpose": "Test the no-attack non-inferiority guardrail against D-OC (DRACO-inspired)",
       "non_inferiority_margin": -0.03
     },
     "P-4a": {

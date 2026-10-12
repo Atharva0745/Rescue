@@ -27,7 +27,9 @@ References:
 """
 
 import sys
+import os
 import json
+import hashlib
 import math
 import random
 import time
@@ -47,7 +49,9 @@ class SimulatedRequest:
         is_attack: bool,
         demands: Dict[str, float],
         deadline: float,
-        datastore_partition: int = 1
+        datastore_partition: int = 1,
+        fault_draw: float = 0.0,
+        policy_draw: float = 0.0
     ):
         self.req_id = req_id
         self.req_class = req_class
@@ -56,6 +60,8 @@ class SimulatedRequest:
         self.demands = demands  # Stage service times: S1, S2, S3
         self.deadline = deadline
         self.datastore_partition = datastore_partition
+        self.fault_draw = fault_draw
+        self.policy_draw = policy_draw
         self.admitted: bool = False
         self.completion_time: Optional[float] = None
         self.stale_write_committed: bool = False
@@ -66,13 +72,16 @@ def generate_workload_trace(
     workload_id: str,
     trace_seed: int,
     total_duration: float = 90.0,
-    alpha_attack: float = 0.25
+    alpha_attack: float = 0.25,
+    fault_seed: Optional[int] = None
 ) -> List[SimulatedRequest]:
     """
     Generate synthetic request stream following W1 or W3 profile.
     Decoupled trace seed ensures identical arrival sequences across arms.
     """
     rng = random.Random(trace_seed)
+    fault_rng = random.Random(fault_seed if fault_seed is not None else trace_seed ^ 0x5EED)
+    policy_rng = random.Random(trace_seed ^ 0xA11CE)
     requests = []
     current_time = 0.0
     req_id = 1
@@ -133,7 +142,9 @@ def generate_workload_trace(
                 is_attack=is_attack,
                 demands={"S1": d_s1, "S2": d_s2, "S3": d_s3},
                 deadline=deadline,
-                datastore_partition=partition
+                datastore_partition=partition,
+                fault_draw=fault_rng.random(),
+                policy_draw=policy_rng.random()
             )
         )
         req_id += 1
@@ -161,7 +172,7 @@ class ArmSimulator:
     ):
         self.arm_name = arm_name
         self.fault_rate = fault_rate
-        self.fault_rng = random.Random(fault_seed)
+        self.fault_seed = fault_seed
         self.c_w = c_w
         self.gateway_crash_time = gateway_crash_time
 
@@ -189,37 +200,55 @@ class ArmSimulator:
         """
         t_start, t_end = measurement_window
         t_window_duration = t_end - t_start
+        if t_end <= t_start:
+            raise ValueError("measurement window must have positive duration")
+        if not 0.0 <= self.fault_rate <= 1.0:
+            raise ValueError("fault_rate must be in [0, 1]")
 
-        # Stage executor trackers: available release timestamps
         stage_executors = {
             s: [0.0] * self.capacities[s] for s in ("S1", "S2", "S3")
         }
-
-        # Dynamic available capacity for Policy B (deducting quarantined executors in OC)
-        k_avail_s2 = 16
-
-        # Policy B capacity ledger: separate interactive and batch held weights
-        held_interactive = 0.0
-        held_batch = 0.0
-        max_batch_quota = 16.0 * 2.0 * 0.40  # Reserve 60% headroom for interactive
-
-        # Policy A' adaptive concurrency limit
+        k_avail_s2 = self.capacities["S2"]
+        reservations: List[Tuple[float, str, float]] = []
+        adaptive_in_flight: List[float] = []
+        draco_in_flight: List[Tuple[float, int]] = []
+        quarantined_executors: Dict[int, float] = {}
+        peak_quarantined_executors = 0
         adaptive_limit = 22.0
-
-        # Output metrics
+        if __package__:
+            from .admission_policy import DracoAdmission
+        else:
+            from admission_policy import DracoAdmission
+        draco = DracoAdmission(num_partitions=2, hot_threshold_ms=100.0)
         total_legitimate_in_window = 0
         successful_legitimate_in_window = 0
         orphan_seconds_past_expiry = 0.0
         stale_writes_committed = 0
-
-        # Seed-level variation generator
-        noise = self.fault_rng.gauss(0.0, 0.003)
+        admitted_count = 0
+        rejected_count = 0
 
         for req in requests:
             t_arr = req.arrival_time
             in_window = (t_start <= t_arr <= t_end)
             if in_window and not req.is_attack:
                 total_legitimate_in_window += 1
+            quarantined_executors = {
+                executor_idx: release_time
+                for executor_idx, release_time in quarantined_executors.items()
+                if release_time > t_arr
+            }
+            k_avail_s2 = (
+                self.capacities["S2"] - len(quarantined_executors)
+            )
+            adaptive_in_flight = [release for release in adaptive_in_flight if release > t_arr]
+            remaining_draco = []
+            for release, partition in draco_in_flight:
+                if release <= t_arr:
+                    draco.release_in_flight(partition)
+                else:
+                    remaining_draco.append((release, partition))
+            draco_in_flight = remaining_draco
+            reservations = [entry for entry in reservations if entry[0] > t_arr]
 
             # -------------------------------------------------------------
             # Step 1: Admission Decision
@@ -227,41 +256,46 @@ class ArmSimulator:
             admitted = False
 
             if self.policy_type == "B":
-                # RESCUE-4 Reservation Ledger
-                w = self.class_weights[req.req_class]
-                max_cap = k_avail_s2 * 2.0
-                if req.req_class == "C_INTERACTIVE":
-                    # Interactive requests have guaranteed reservation headroom
-                    if held_interactive + held_batch + w <= max_cap:
-                        admitted = True
-                        held_interactive += w
-                else:  # C_BATCH
-                    # Batch jobs are constrained by the batch reservation cap
-                    if (held_batch + w <= max_batch_quota) and (held_interactive + held_batch + w <= max_cap):
-                        admitted = True
-                        held_batch += w
+                weight = self.class_weights[req.req_class]
+                held = sum(entry[2] for entry in reservations)
+                held_batch = sum(
+                    entry[2] for entry in reservations if entry[1] == "C_BATCH"
+                )
+                max_capacity = k_avail_s2 * 2.0
+                batch_quota = max_capacity * 0.40
+                admitted = (
+                    held + weight <= max_capacity
+                    and (
+                        req.req_class != "C_BATCH"
+                        or held_batch + weight <= batch_quota
+                    )
+                )
 
             elif self.policy_type == "D":
-                # DRACO-inspired datastore selective shedding
-                if req.datastore_partition == 2 and 25.0 <= t_arr <= 55.0:
-                    # Hot partition selectively dropped during peak attack
-                    # 70% of hot partition dropped to protect datastore
-                    admitted = (self.fault_rng.random() < 0.30)
-                else:
-                    admitted = True
+                active_s2_delay = max(0.0, min(stage_executors["S2"]) - t_arr)
+                estimated_latency_ms = (
+                    active_s2_delay + req.demands["S2"]
+                ) * 1000.0
+                draco.update_datastore_latency(
+                    req.datastore_partition, estimated_latency_ms
+                )
+                admitted, _ = draco.should_admit(req, t_arr)
 
             elif self.policy_type == "A'":
-                # Adaptive Limiter (AIMD)
-                if 25.0 <= t_arr <= 55.0:
-                    adaptive_limit = max(10.0, adaptive_limit * 0.99)
+                queue_delay_ms = max(
+                    0.0, min(stage_executors["S2"]) - t_arr
+                ) * 1000.0
+                if queue_delay_ms > 100.0:
+                    adaptive_limit = max(2.0, adaptive_limit * 0.8)
                 else:
-                    adaptive_limit = min(24.0, adaptive_limit + 0.05)
-
-                admitted = (self.fault_rng.random() < min(1.0, adaptive_limit / 22.0))
+                    adaptive_limit = min(32.0, adaptive_limit + 0.5)
+                admitted = len(adaptive_in_flight) < int(adaptive_limit)
 
             req.admitted = admitted
             if not admitted:
+                rejected_count += 1
                 continue
+            admitted_count += 1
 
             # -------------------------------------------------------------
             # Step 2: Multi-Stage Execution & Queueing
@@ -269,7 +303,8 @@ class ArmSimulator:
             curr_time = t_arr
             cap_limit = self.caps[req.req_class]
             exceeded_cap = False
-            assigned_executors = {}
+            assigned_executors: Dict[str, int] = {}
+            executor_schedule: Dict[str, Tuple[int, float, float, float]] = {}
 
             # Pipeline execution: S1 -> S2 -> S3
             for s in ("S1", "S2", "S3"):
@@ -283,108 +318,108 @@ class ArmSimulator:
                 curr_time = finish_t
                 executors[idx] = finish_t
                 assigned_executors[s] = idx
+                executor_schedule[s] = (
+                    idx,
+                    earliest_exec,
+                    start_t,
+                    finish_t,
+                )
 
                 if (curr_time - t_arr) > cap_limit:
                     exceeded_cap = True
 
             req.completion_time = curr_time
 
-            # Release capacity in Policy B ledger
             if self.policy_type == "B":
-                if req.req_class == "C_INTERACTIVE":
-                    held_interactive = max(0.0, held_interactive - self.class_weights[req.req_class])
-                else:
-                    held_batch = max(0.0, held_batch - self.class_weights[req.req_class])
+                reservations.append(
+                    (curr_time, req.req_class, self.class_weights[req.req_class])
+                )
+            elif self.policy_type == "A'":
+                adaptive_in_flight.append(curr_time)
+            elif self.policy_type == "D":
+                draco_in_flight.append((curr_time, req.datastore_partition))
 
             # -------------------------------------------------------------
             # Step 3: Cancellation & Zombie Executor Contention
             # -------------------------------------------------------------
-            if exceeded_cap or req.is_attack:
-                # Stop cancellation attempt: fails with probability fault_rate
-                cancel_failed = (self.fault_rng.random() < self.fault_rate)
+            if exceeded_cap:
+                lease_expiry = t_arr + cap_limit
+                if req.fault_draw < self.fault_rate:
+                    cancellation_delay = 0.12 + 0.28 * req.policy_draw
+                    s2_idx = assigned_executors["S2"]
+                    _, _, s2_start, s2_finish = executor_schedule["S2"]
+                    quarantine_release = max(s2_finish, lease_expiry) + cancellation_delay
+                    orphan_seconds_past_expiry += (
+                        max(0.0, s2_finish - max(s2_start, lease_expiry))
+                        + cancellation_delay
+                    )
+                    stage_executors["S2"][s2_idx] = quarantine_release
 
-                if cancel_failed:
-                    # Zombie task runs past expiry
-                    runaway_time = curr_time - (t_arr + cap_limit)
-                    if runaway_time <= 0:
-                        runaway_time = self.fault_rng.uniform(0.12, 0.40)
+                    if self.policy_type == "B":
+                        release_time = (
+                            quarantine_release
+                            if self.is_oc
+                            else lease_expiry
+                        )
+                        reservations[-1] = (
+                            release_time,
+                            req.req_class,
+                            self.class_weights[req.req_class],
+                        )
 
-                    orphan_seconds_past_expiry += runaway_time
-
-                    if self.is_tr:
-                        # In TR: Capacity released at expiry WITHOUT owner confirmation.
-                        # Zombie continues running on the executor, delaying upcoming jobs!
-                        s2_idx = assigned_executors.get("S2", 0)
-                        # Bounded contention delay on the executor
-                        stage_executors["S2"][s2_idx] += min(0.35, runaway_time * 0.50)
-
-                        # In W3, zombie attempts a stale write after crash
-                        if self.gateway_crash_time and curr_time > self.gateway_crash_time:
-                            # Without database fencing, stale write COMMITS!
+                    if self.is_oc:
+                        quarantined_executors[s2_idx] = quarantine_release
+                        peak_quarantined_executors = max(
+                            peak_quarantined_executors,
+                            len(quarantined_executors),
+                        )
+                    elif self.is_tr:
+                        if (
+                            self.gateway_crash_time is not None
+                            and curr_time > self.gateway_crash_time
+                            and curr_time > t_arr + cap_limit
+                        ):
                             stale_writes_committed += 1
                             req.stale_write_committed = True
-
-                    elif self.is_oc:
-                        # In OC: Unconfirmed executor is quarantined, and database fencing
-                        # REJECTS stale write commits!
-                        req.stale_write_committed = False
+                else:
+                    req.completion_time = None
+                    for stage, (idx, previous, start, finish) in executor_schedule.items():
+                        stage_executors[stage][idx] = (
+                            previous
+                            if start >= lease_expiry
+                            else max(previous, min(finish, lease_expiry))
+                        )
+                    if self.policy_type == "B":
+                        reservations[-1] = (
+                            lease_expiry,
+                            req.req_class,
+                            self.class_weights[req.req_class],
+                        )
+                    elif self.policy_type == "A'":
+                        adaptive_in_flight[-1] = lease_expiry
+                    elif self.policy_type == "D":
+                        draco_in_flight[-1] = (
+                            lease_expiry,
+                            req.datastore_partition,
+                        )
 
             # -------------------------------------------------------------
             # Step 4: Legitimate Success Evaluation
             # -------------------------------------------------------------
-            if in_window and not req.is_attack:
+            if in_window and not req.is_attack and req.completion_time is not None:
                 latency = curr_time - t_arr
                 if latency <= req.deadline:
                     successful_legitimate_in_window += 1
 
         # -----------------------------------------------------------------
-        # Step 5: Metric Aggregation & Physical Calibration
+        # Step 5: Aggregate outcomes produced by the simulated mechanisms.
         # -----------------------------------------------------------------
-        base_S_L = (
+        S_L = (
             successful_legitimate_in_window / total_legitimate_in_window
             if total_legitimate_in_window > 0 else 0.0
         )
 
-        # Calibrate baseline success rates to reflect empirical system behavior
-        if self.arm_name == "B-OC":
-            S_L = min(0.985, max(0.910, base_S_L + 0.015 + noise))
-            stale_writes_committed = 0  # 100% fenced
-            OE = orphan_seconds_past_expiry * 0.40  # Bounded by quarantine
-        elif self.arm_name == "B-TR":
-            # TR experiences zombie contention deadline misses
-            S_L = min(0.960, max(0.880, base_S_L - 0.013 + noise))
-            if self.fault_rate == 0.0:
-                stale_writes_committed = 0
-                OE = 0.0
-            else:
-                stale_writes_committed = max(4, min(12, int(stale_writes_committed * 0.85)))
-                OE = orphan_seconds_past_expiry + self.c_w * stale_writes_committed
-        elif self.arm_name == "D-TR":
-            # DRACO drops hot partition + TR zombie contention
-            S_L = min(0.950, max(0.870, base_S_L - 0.020 + noise))
-            if self.fault_rate == 0.0:
-                stale_writes_committed = 0
-                OE = 0.0
-            else:
-                stale_writes_committed = max(5, min(14, int(stale_writes_committed * 0.90)))
-                OE = orphan_seconds_past_expiry * 1.05 + self.c_w * stale_writes_committed
-        elif self.arm_name == "A'-TR":
-            # Adaptive limiter collateral dropping
-            S_L = min(0.920, max(0.830, base_S_L - 0.035 + noise))
-            if self.fault_rate == 0.0:
-                stale_writes_committed = 0
-                OE = 0.0
-            else:
-                stale_writes_committed = max(7, min(18, int(stale_writes_committed * 1.10)))
-                OE = orphan_seconds_past_expiry * 1.45 + self.c_w * stale_writes_committed
-        elif self.arm_name == "D-OC":
-            # W1 guardrail for D-OC
-            S_L = min(0.980, max(0.930, base_S_L + 0.003 + noise))
-            stale_writes_committed = 0
-            OE = 0.0 if self.fault_rate == 0.0 else (orphan_seconds_past_expiry * 0.45)
-        else:
-            S_L = base_S_L
-            OE = orphan_seconds_past_expiry + self.c_w * stale_writes_committed
+        OE = orphan_seconds_past_expiry + self.c_w * stale_writes_committed
 
         # Normalization denominator: sum_s(K_s * T_window) = 28 * 60 = 1680.0
         norm_denominator = self.total_K * t_window_duration
@@ -397,6 +432,9 @@ class ArmSimulator:
             "S_L": round(S_L, 5),
             "executor_seconds_past_expiry": round(orphan_seconds_past_expiry, 4),
             "stale_writes_committed": stale_writes_committed,
+            "admitted_requests": admitted_count,
+            "rejected_requests": rejected_count,
+            "peak_quarantined_executors": peak_quarantined_executors,
             "OE": round(OE, 4),
             "OE_norm": round(OE_norm, 6),
             "norm_denominator": norm_denominator
@@ -408,7 +446,8 @@ class ArmSimulator:
 # ---------------------------------------------------------------------------
 
 def run_confirmatory_experiment(
-    manifest_path: str = "config/preregistration_manifest.json"
+    manifest_path: str = "config/preregistration_repaired.json",
+    output_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Runs the complete 25-seed confirmatory evaluation suite.
@@ -417,20 +456,50 @@ def run_confirmatory_experiment(
     with open(manifest_path, "r") as f:
         manifest = json.load(f)
 
+    pilot_provenance = manifest.get("pilot_data_provenance")
+    registered = pilot_provenance is not None
+    if registered:
+        recorded_hash = manifest.get("meta", {}).get("sha256_hash")
+        if __package__:
+            from .preregistration_engine import hash_preregistration
+        else:
+            from preregistration_engine import hash_preregistration
+        if recorded_hash != hash_preregistration(manifest):
+            raise ValueError("repaired pre-registration hash verification failed")
+        with open(pilot_provenance["artifact"], "rb") as pilot_file:
+            pilot_hash = hashlib.sha256(pilot_file.read()).hexdigest()
+        if pilot_hash != pilot_provenance["sha256"]:
+            raise ValueError("repaired pre-registration pilot artifact hash mismatch")
+        with open(__file__, "rb") as simulator_source:
+            current_simulator_hash = hashlib.sha256(simulator_source.read()).hexdigest()
+        if current_simulator_hash != pilot_provenance["simulator_sha256"]:
+            raise ValueError(
+                "simulator code changed after pilot; create a new pre-registration"
+            )
+
+    if output_path is None:
+        output_path = (
+            "config/confirmatory_results_repaired_confirmatory.json"
+            if registered
+            else "config/confirmatory_results_repaired_exploratory.json"
+        )
+
     p_main = manifest["frozen_parameters"]["p_main"]
-    delta_OE = manifest["frozen_parameters"]["delta_OE"]
-    delta_C = manifest["frozen_parameters"]["delta_C"]
     c_w = manifest["frozen_parameters"]["c_w"]
     seed_blocks = manifest["seed_manifest"]["seed_blocks"]
     n_seeds = len(seed_blocks)
 
     print("=================================================================")
-    print("    RESCUE-4 CONFIRMATORY SIMULATION EXPERIMENT (PHASE 7)       ")
+    print(
+        " RESCUE-4 REGISTERED SIMULATION RERUN"
+        if registered
+        else " RESCUE-4 EXPLORATORY SIMULATION RERUN"
+    )
     print("=================================================================")
-    print(f"  Pre-Registration SHA-256: {manifest['meta']['sha256_hash'][:16]}...")
-    print(f"  Confirmed Seeds:          {n_seeds}")
-    print(f"  Operating Point p_main:   {p_main} (5.0%)")
-    print(f"  Thresholds:               delta_OE = {delta_OE}, delta_C = {delta_C}, c_w = {c_w}")
+    print(f"  Manifest SHA-256:           {manifest['meta']['sha256_hash'][:16]}...")
+    print(f"  Seeds rerun:                {n_seeds}")
+    print(f"  Fault probability:          {p_main}")
+    print(f"  Stale-write weight c_w:     {c_w}")
     print("=================================================================\n")
 
     # Storage for per-seed results
@@ -461,7 +530,8 @@ def run_confirmatory_experiment(
             workload_id="W3",
             trace_seed=trace_seed,
             total_duration=90.0,
-            alpha_attack=0.25
+            alpha_attack=0.25,
+            fault_seed=fault_seed
         )
 
         # W1: Duration 60s, measurement window [10s, 50s], alpha=0 (pure legitimate)
@@ -469,7 +539,8 @@ def run_confirmatory_experiment(
             workload_id="W1",
             trace_seed=trace_seed,
             total_duration=60.0,
-            alpha_attack=0.0
+            alpha_attack=0.0,
+            fault_seed=fault_seed
         )
 
         seed_arm_outcomes = {}
@@ -524,6 +595,8 @@ def run_confirmatory_experiment(
         per_seed_results.append({
             "seed_index": s_idx,
             "seed_value": s_val,
+            "trace_seed": trace_seed,
+            "fault_draw_seed": fault_seed,
             "arms": seed_arm_outcomes,
             "contrasts": {
                 "P-1a": round(diff_p1a, 6),
@@ -536,34 +609,55 @@ def run_confirmatory_experiment(
         })
 
     elapsed = time.time() - t0
-    print(f"\n[OK] Completed 25 paired confirmatory seed runs in {elapsed:.2f} seconds.")
+    run_label = "registered simulation" if registered else "exploratory"
+    print(f"\n[OK] Completed {n_seeds} paired {run_label} seed runs in {elapsed:.2f} seconds.")
 
     # -----------------------------------------------------------------------
     # §4. Statistical Evaluation & Multiplicity Testing
     # -----------------------------------------------------------------------
-    print("\n--- Running Pre-Registered One-Sided Sign-Flip Permutation Tests ---")
+    print(
+        "\n--- Registered Tests ---"
+        if registered
+        else "\n--- Descriptive Paired Contrast Summaries (Exploratory Only) ---"
+    )
 
-    test_results = {}
+    contrast_summaries = {}
+    statistical_tests = {}
+    alpha = float(manifest["frozen_parameters"].get("alpha", 0.05))
     thresholds = {
-        "P-1a": delta_OE,
-        "P-1b": delta_OE,
-        "P-2":  delta_C,
-        "P-3":  -0.0300,
-        "P-4a": delta_OE,
-        "P-4b": delta_C
+        "P-1a": float(manifest["frozen_parameters"].get("delta_OE", 0.0)),
+        "P-1b": float(manifest["frozen_parameters"].get("delta_OE", 0.0)),
+        "P-2": float(manifest["frozen_parameters"].get("delta_C", 0.0)),
+        "P-3": float(
+            manifest["frozen_parameters"].get("non_inferiority_margin_P3", -0.03)
+        ),
+        "P-4a": float(manifest["frozen_parameters"].get("delta_OE", 0.0)),
+        "P-4b": float(manifest["frozen_parameters"].get("delta_C", 0.0)),
     }
-
-    from preregistration_engine import sign_flip_permutation_test
+    diagnostics = manifest.get("assumption_diagnostics", {})
+    use_wilcoxon = registered and not diagnostics.get(
+        "all_assumptions_supported", False
+    )
+    if use_wilcoxon and diagnostics.get("fallback_test") != (
+        "Wilcoxon signed-rank test (one-sided)"
+    ):
+        raise ValueError("registered fallback test is missing or unsupported")
+    if registered:
+        if __package__:
+            from .preregistration_engine import (
+                exact_wilcoxon_signed_rank_p,
+                holm_adjustment,
+                sign_flip_permutation_test,
+            )
+        else:
+            from preregistration_engine import (
+                exact_wilcoxon_signed_rank_p,
+                holm_adjustment,
+                sign_flip_permutation_test,
+            )
 
     for hyp_id in ("P-1a", "P-1b", "P-2", "P-3", "P-4a", "P-4b"):
         diffs = contrasts[hyp_id]
-        thresh = thresholds[hyp_id]
-        res = sign_flip_permutation_test(
-            paired_diffs=diffs,
-            threshold=thresh,
-            n_flips=100_000,
-            seed=20261011 + len(hyp_id)
-        )
 
         mean_diff = sum(diffs) / len(diffs)
         var_diff = sum((d - mean_diff) ** 2 for d in diffs) / (len(diffs) - 1)
@@ -579,53 +673,87 @@ def run_confirmatory_experiment(
         ci_lower = boot_means[int(0.025 * 10_000)]
         ci_upper = boot_means[int(0.975 * 10_000)]
 
-        test_results[hyp_id] = {
+        contrast_summaries[hyp_id] = {
             "mean_difference": round(mean_diff, 5),
             "sd_difference": round(sd_diff, 5),
-            "threshold": thresh,
-            "bootstrap_95_ci": [round(ci_lower, 5), round(ci_upper, 5)],
-            "raw_p_value": res["p_value"],
-            "reject_raw_0.05": res["reject_at_0.05"]
+            "bootstrap_95_ci": [round(ci_lower, 5), round(ci_upper, 5)]
         }
-        print(f"  {hyp_id}: mean={mean_diff:+.5f}, thresh={thresh:+.4f}, 95% CI=[{ci_lower:+.5f}, {ci_upper:+.5f}], p={res['p_value']:.6f} -> {'REJECT H0' if res['reject_at_0.05'] else 'FAIL TO REJECT'}")
+        if registered:
+            if use_wilcoxon:
+                p_value = exact_wilcoxon_signed_rank_p(
+                    diffs, thresholds[hyp_id]
+                )
+                test_name = "Exact one-sided Wilcoxon signed-rank"
+            else:
+                test_seed = int(
+                    hashlib.sha256(
+                        f"{recorded_hash}:{hyp_id}".encode("utf-8")
+                    ).hexdigest()[:8],
+                    16,
+                )
+                test_result = sign_flip_permutation_test(
+                    diffs,
+                    thresholds[hyp_id],
+                    n_flips=int(
+                        manifest["frozen_parameters"]["permutation_flips"]
+                    ),
+                    seed=test_seed,
+                )
+                p_value = test_result["p_value"]
+                test_name = "One-sided paired sign-flip permutation"
+            statistical_tests[hyp_id] = {
+                "test": test_name,
+                "threshold": thresholds[hyp_id],
+                "p_value": p_value,
+                "reject_at_alpha": p_value < alpha,
+            }
+            print(
+                f"  {hyp_id}: mean={mean_diff:+.5f}, "
+                f"threshold={thresholds[hyp_id]:+.5f}, "
+                f"p={p_value:.8f}"
+            )
+        else:
+            print(
+                f"  {hyp_id}: mean={mean_diff:+.5f}, "
+                f"descriptive 95% percentile bootstrap CI="
+                f"[{ci_lower:+.5f}, {ci_upper:+.5f}]"
+            )
 
-    # Holm Step-Down Adjustment across all 6 hypotheses
-    print("\n--- Applying Pre-Registered Holm Step-Down Multiplicity Adjustment ---")
-    sorted_hyps = sorted(test_results.keys(), key=lambda h: test_results[h]["raw_p_value"])
-    all_rejected = True
-
-    for rank, hyp_id in enumerate(sorted_hyps):
-        raw_p = test_results[hyp_id]["raw_p_value"]
-        adj_alpha = 0.05 / (6 - rank)
-        reject = all_rejected and (raw_p <= adj_alpha)
-        if not reject:
-            all_rejected = False
-
-        adj_p = min(1.0, raw_p * (6 - rank))
-        test_results[hyp_id]["holm_rank"] = rank + 1
-        test_results[hyp_id]["holm_adjusted_alpha"] = round(adj_alpha, 6)
-        test_results[hyp_id]["holm_adjusted_p"] = round(adj_p, 6)
-        test_results[hyp_id]["holm_reject"] = reject
-        print(f"  Rank {rank+1}: {hyp_id} | raw_p={raw_p:.6f} <= alpha_adj={adj_alpha:.6f} | Holm_p={adj_p:.6f} | Final: {'REJECT' if reject else 'FAIL'}")
-
-    # Intersection-Union Joint Novelty Decision Rule
-    all_six_reject = all(test_results[h]["reject_raw_0.05"] for h in test_results)
-    if all_six_reject:
+    if registered:
+        holm_results = holm_adjustment(
+            {h: result["p_value"] for h, result in statistical_tests.items()},
+            alpha=alpha,
+        )
+        for hypothesis, result in holm_results.items():
+            statistical_tests[hypothesis]["holm"] = result
+        all_six_reject = all(
+            result["reject_at_alpha"] for result in statistical_tests.values()
+        )
         joint_conclusion = (
-            "Containment benefit supported at p_main = 0.05 for the tested software stack and configuration."
+            "All registered hypotheses reject for this simulation model only; "
+            "this is not evidence about a deployed system."
+            if all_six_reject
+            else "The registered joint claim is not supported by this simulation run."
+        )
+        print(
+            "\n[SIMULATION IUT]: "
+            f"{'SUPPORTED IN THIS MODEL ONLY' if all_six_reject else 'NOT SUPPORTED'}"
         )
     else:
-        joint_conclusion = "Novelty claim not fully supported under pre-registered Intersection-Union rule."
-
-    print(f"\n[JOINT DECISION RULE]: {'ALL 6 REJECTED' if all_six_reject else 'REJECTION INCOMPLETE'}")
+        all_six_reject = None
+        joint_conclusion = (
+            "Not assessed: the prior pilot thresholds were synthetic, so this "
+            "run is exploratory and cannot support a registered joint claim."
+        )
+        print("\n[JOINT DECISION RULE]: NOT ASSESSED")
     print(f"  {joint_conclusion}")
 
     # -----------------------------------------------------------------------
     # §5. Secondary Analysis: Fault Sweep & Crossover Analysis
     # -----------------------------------------------------------------------
-    print("\n--- Executing Secondary Fault Sweep (p in {0.00, 0.01, 0.05, 0.20}) ---")
+    print("\n--- Executing Exploratory Fault Sweep (p in {0.00, 0.003, 0.01, 0.05, 0.20}) ---")
     sweep_results = {}
-    sweep_p = [0.00, 0.01, 0.05, 0.20]
+    sweep_p = [0.00, 0.003, 0.01, 0.05, 0.20]
 
     for p_val in sweep_p:
         tr_oe_list = []
@@ -633,7 +761,9 @@ def run_confirmatory_experiment(
         for s in seed_blocks[:10]:
             t_seed = s["trace_seed"]
             f_seed = s["fault_draw_seed"]
-            reqs = generate_workload_trace("W3", t_seed, 90.0, 0.25)
+            reqs = generate_workload_trace(
+                "W3", t_seed, 90.0, 0.25, fault_seed=f_seed
+            )
 
             sim_tr = ArmSimulator("B-TR", p_val, f_seed, c_w, 35.0)
             res_tr = sim_tr.run_workload(reqs, (15.0, 75.0))
@@ -654,56 +784,107 @@ def run_confirmatory_experiment(
         }
         print(f"  p = {p_val*100:04.1f}%: B-TR OE_norm={mean_tr:.5f}, B-OC OE_norm={mean_oc:.5f}, Diff={diff_oe:+.5f}")
 
-    crossover_point = 0.0030
-    print(f"  -> Crossover Point p*: OC begins outperforming TR at p >= {crossover_point*100:.2f}% fault rate.")
+    crossover_point = next(
+        (
+            float(cell)
+            for cell, result in sweep_results.items()
+            if result["diff_B_TR_minus_B_OC"] > 0.0
+        ),
+        None,
+    )
+    print(f"  -> First tested fault rate with lower B-OC OE: {crossover_point}")
 
     # -----------------------------------------------------------------------
     # §6. Export Confirmatory Results Package
     # -----------------------------------------------------------------------
+    with open(__file__, "rb") as simulator_source:
+        simulator_sha256 = hashlib.sha256(simulator_source.read()).hexdigest()
+
     final_output = {
         "meta": {
-            "document": "RESCUE-4 Confirmatory Simulation Results Package",
-            "phase": "Phase 7 - Confirmatory Simulation",
-            "status": "COMPLETED",
+            "document": (
+                "RESCUE-4 Registered Simulation Results Package"
+                if registered
+                else "RESCUE-4 Exploratory Simulation Results Package"
+            ),
+            "phase": (
+                "New simulator-only confirmatory study"
+                if registered
+                else "Exploratory simulator repair rerun"
+            ),
+            "status": (
+                "COMPLETED_SIMULATION_ONLY"
+                if registered
+                else "EXPLORATORY_NOT_CONFIRMATORY"
+            ),
             "execution_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "pre_registration_sha256": manifest["meta"]["sha256_hash"],
+            "simulator_sha256": simulator_sha256,
             "p_main": p_main,
-            "n_confirmatory_seeds": n_seeds
+            "n_seeds": n_seeds,
+            "interpretation": (
+                "Registered inference applies only to this simplified simulation "
+                "model and its pilot-derived thresholds; it does not establish "
+                "behavior in a deployed system."
+                if registered
+                else
+                "Exploratory rerun using simulated mechanism outcomes. The frozen "
+                "pilot thresholds were generated synthetically and are not valid "
+                "for confirmatory inference."
+            )
         },
-        "hypothesis_decisions": test_results,
+        "paired_contrast_summaries": contrast_summaries,
+        "statistical_tests": statistical_tests,
         "joint_novelty_claim": {
             "all_six_reject": all_six_reject,
             "conclusion": joint_conclusion,
-            "decision_rule": "Intersection-Union Test (IUT)"
+            "decision_rule": "Intersection-Union Test (IUT)",
+            "scope": "simulation model only" if registered else "not assessed"
         },
         "fault_sweep_secondary": {
             "sweep_results": sweep_results,
             "crossover_point_p_star": crossover_point,
-            "zero_fault_overhead_check": "Zero-fault cell verified: OC imposes zero observable OE overhead over TR."
+            "zero_fault_overhead_check": (
+                sweep_results["0.0"]["diff_B_TR_minus_B_OC"] == 0.0
+            )
         },
+        "simulation_limitations": [
+            "This is a simplified, single-process Python simulation, not a deployed system.",
+            "The A-prime, B, and DRACO-inspired policies do not establish production-policy fidelity.",
+            "No PostgreSQL server, WAL stream, database trigger, or real concurrent execution was exercised.",
+        ],
         "per_seed_records": per_seed_results
     }
 
-    out_file = "config/confirmatory_results.json"
-    with open(out_file, "w") as f:
+    out_file = output_path
+    with open(out_file, "x") as f:
         json.dump(final_output, f, indent=2)
 
-    print(f"\n[OK] Exported confirmatory results package to {out_file}")
+    print(f"\n[OK] Exported exploratory results package to {out_file}")
 
     print("\n=================================================================")
-    print("  PHASE 7 CONFIRMATORY SIMULATION SUMMARY")
+    print(
+        "  REGISTERED SIMULATION SUMMARY"
+        if registered
+        else "  EXPLORATORY SIMULATION SUMMARY"
+    )
     print("=================================================================")
-    print("  All 25 registered seeds executed across all experimental arms.")
+    print(f"  Seeds executed:            {n_seeds}")
     for h in ("P-1a", "P-1b", "P-2", "P-3", "P-4a", "P-4b"):
-        status = "REJECT H0" if test_results[h]["reject_raw_0.05"] else "FAIL TO REJECT"
-        print(f"  {h:4s}: mean_diff={test_results[h]['mean_difference']:+.5f} (p={test_results[h]['raw_p_value']:.6f}) [{status}]")
-    print(f"  Joint Novelty Claim:    {'SUPPORTED' if all_six_reject else 'UNSUPPORTED'} at p_main = {p_main}")
-    print("=================================================================")
-    print("  PHASE 7 EXIT GATE: PASSED.")
+        print(f"  {h:4s}: mean_diff={contrast_summaries[h]['mean_difference']:+.5f}")
+    print(
+        "  Inferential status:      SIMULATION ONLY"
+        if registered
+        else "  Inferential status:      NOT ASSESSED"
+    )
     print("=================================================================")
 
     return final_output
 
 
 if __name__ == "__main__":
+    from preregistration_engine import generate_repaired_preregistration
+
+    if not os.path.isfile("config/preregistration_repaired.json"):
+        generate_repaired_preregistration()
     run_confirmatory_experiment()
