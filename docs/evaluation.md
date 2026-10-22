@@ -243,13 +243,39 @@ Do not let a favorable aggregate conceal a regression in one component.
 
 For each seed, `S_L` is the fraction of harness-labeled legitimate
 requests that arrive within the measurement window and receive their
-full response by `arrival + D_c`. Rejections and timeouts count as
-failures.
+full response by `arrival + D_c`. A success requires a `completed`
+outcome, admission, a recorded completion timestamp no later than the
+request deadline, and consistent deadline fields. Rejections, timeouts,
+deadline misses, and unfinished requests count as failures. The same
+pre-registered arrival window must be configured for every arm in a
+paired comparison.
 
 Report per-arm per-seed values, paired differences, and the registered
 aggregate statistics.
 
+For the generated Go mixed-pool diagnostic, also report first-contact
+legitimate success (`S_F`) separately: successful, harness-labeled
+legitimate first-contact requests divided by legitimate first-contact
+requests offered in the measurement window. Use the same completion and
+deadline predicate as `S_L`. This diagnostic is not a substitute for the
+registered baseline comparison, and generated legitimacy labels do not
+establish real-world user identity.
+
 ### 7.3 Supporting measures
+
+If reporting goodput, use the same fixed wall-clock measurement interval
+for every arm. Goodput is the number of successful completions whose
+completion timestamps fall within that interval, divided by the full
+interval duration; do not derive the denominator from observed arrivals
+or successful requests. Report successful legitimate-request latency
+percentiles separately from timeout and deadline-miss counts. Failed or
+unfinished request durations are censored and excluded from the
+successful-latency distribution. In the Go benchmark, `S_L` is evaluated
+for requests arriving within the measurement window and against each
+request's own deadline; a qualifying completion can occur after the
+measurement window. In-window goodput instead requires the completion
+timestamp to fall inside the measurement window. Label these distinct
+boundaries when reporting both measures.
 
 Report executor occupancy, cancellation and kill outcomes,
 quarantined/UNCONFIRMED executors, service-rate degradation, deadline

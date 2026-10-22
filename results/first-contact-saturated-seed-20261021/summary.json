@@ -1,0 +1,33 @@
+{
+  "run_id": "go-bench-20261020T171537Z",
+  "controller": "rescue-go-controller",
+  "seed": 20261021,
+  "duration_seconds": 62.701814271,
+  "measurement_window": {
+    "start": "2026-10-20T17:15:37.384409278Z",
+    "end": "2026-10-20T17:16:37.384409278Z"
+  },
+  "total_requests": 5984,
+  "legitimate_offered": 4802,
+  "legitimate_admitted": 4802,
+  "legitimate_succeeded": 19,
+  "legitimate_rejected": 0,
+  "legitimate_timed_out": 0,
+  "legitimate_deadline_missed": 4783,
+  "timed_out_requests": 0,
+  "deadline_missed_requests": 5965,
+  "attacker_offered": 1182,
+  "attacker_admitted": 1182,
+  "S_L": 0.003956684714702207,
+  "false_rejection_rate": 0,
+  "attacker_admission_rate": 1,
+  "goodput_rps": 0,
+  "legitimate_goodput_rps": 0,
+  "p50_latency_ms": 482.349,
+  "p95_latency_ms": 499.57,
+  "p99_latency_ms": 499.57,
+  "avg_accounting_error": -0.0016542597187758478,
+  "max_unsafe_error": 0,
+  "accounting_snapshots": 1209,
+  "quarantine_count": 0
+}
