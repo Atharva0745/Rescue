@@ -2,6 +2,7 @@ package intake
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -102,26 +103,34 @@ func NewIntakeLog(fsyncOK bool) *IntakeLog {
 
 // IdempotencyScope computes the stable scope under which a report is deduplicated.
 func IdempotencyScope(sourceKey, nonce string) string {
-	h := sha256.Sum256([]byte(sourceKey + ":" + nonce))
+	sourceKey = normalizeSourceKey(sourceKey)
+	nonce = normalizeNonce(nonce)
+	encoded := make([]byte, 0, 16+len(sourceKey)+len(nonce))
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(sourceKey)))
+	encoded = append(encoded, length[:]...)
+	encoded = append(encoded, sourceKey...)
+	binary.BigEndian.PutUint64(length[:], uint64(len(nonce)))
+	encoded = append(encoded, length[:]...)
+	encoded = append(encoded, nonce...)
+	h := sha256.Sum256(encoded)
 	return hex.EncodeToString(h[:])
 }
 
 // Accept ensures a report is durably recorded once. A repeated same key and same
 // payload hash returns the prior receipt. A same key with conflicting payload is rejected.
 func (l *IntakeLog) Accept(r Report) (Receipt, error) {
-	if strings.TrimSpace(r.SourceKey) == "" {
-		r.SourceKey = "anonymous"
+	r.SourceKey = normalizeSourceKey(r.SourceKey)
+	r.Nonce = normalizeNonce(r.Nonce)
+	payloadHash := PayloadHash(r.Payload)
+	if r.PayloadHash != "" && r.PayloadHash != payloadHash {
+		return Receipt{}, fmt.Errorf("payload hash does not match report payload")
 	}
-	if strings.TrimSpace(r.Nonce) == "" {
-		r.Nonce = "-"
-	}
-	if r.PayloadHash == "" {
-		r.PayloadHash = PayloadHash(r.Payload)
-	}
+	r.PayloadHash = payloadHash
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
 	}
-	if r.ID == "" {
+	if strings.TrimSpace(r.ID) == "" {
 		r.ID = fmt.Sprintf("report-%d", r.CreatedAt.UnixNano())
 	}
 
@@ -140,6 +149,9 @@ func (l *IntakeLog) Accept(r Report) (Receipt, error) {
 	if !l.fsyncOK {
 		return Receipt{}, fmt.Errorf("durable intake fsync failed; no new receipts issued")
 	}
+	if _, exists := l.receipts[r.ID]; exists {
+		return Receipt{}, fmt.Errorf("report ID %s is already assigned to another receipt", r.ID)
+	}
 
 	rec := Receipt{
 		ReportID:       r.ID,
@@ -152,6 +164,20 @@ func (l *IntakeLog) Accept(r Report) (Receipt, error) {
 	l.receipts[rec.ReportID] = rec
 	l.byKey[key] = rec.ReportID
 	return rec, nil
+}
+
+func normalizeSourceKey(sourceKey string) string {
+	if strings.TrimSpace(sourceKey) == "" {
+		return "anonymous"
+	}
+	return sourceKey
+}
+
+func normalizeNonce(nonce string) string {
+	if strings.TrimSpace(nonce) == "" {
+		return "-"
+	}
+	return nonce
 }
 
 func (l *IntakeLog) ReceiptForKey(key string) (Receipt, bool) {

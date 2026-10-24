@@ -1,6 +1,11 @@
 package source
 
-import "testing"
+import (
+	"sync"
+	"testing"
+
+	"github.com/rescue-gateway/gateway/pkg/pool"
+)
 
 func TestReserveEnforcesSharedSourceGroupCap(t *testing.T) {
 	r := NewRegistry(map[string]int{
@@ -62,7 +67,43 @@ func TestConcurrentReservationsCannotExceedCap(t *testing.T) {
 			successes++
 		}
 	}
+
 	if successes != 1 {
 		t.Fatalf("expected exactly one reservation under global cap, got %d", successes)
+	}
+}
+
+func TestChoosePoolIsSafeDuringPromotionAndPolicyReplacement(t *testing.T) {
+	r := NewRegistry(nil)
+	r.RegisterSource("source", "group", "asn", "region")
+	r.SetPoolPolicy(pool.NewPolicy(8, 1))
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 4; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if worker == 0 {
+					r.Promote("source", TierNormal, "normal")
+					r.Promote("source", TierEmergency, "emergency")
+				} else if worker == 1 {
+					r.SetPoolPolicy(pool.NewPolicy(8, 1))
+				} else {
+					_ = r.ChoosePool("source", "normal")
+					_ = r.Get("source")
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+}
+
+func TestReserveRejectsOverflowingRequest(t *testing.T) {
+	r := NewRegistry(nil)
+	r.RegisterSource("source", "group", "asn", "region")
+	maxInt := int(^uint(0) >> 1)
+	if err := r.Reserve("source", maxInt); err == nil {
+		t.Fatal("reservation overflow bypassed quota caps")
 	}
 }

@@ -97,3 +97,23 @@ func TestSnapshotAndRemoveForDispatchPreserveAccounting(t *testing.T) {
 		t.Fatalf("unexpected queue counters: %+v", stats)
 	}
 }
+
+func TestQueueRejectsDuplicateIDsAndReleasesIDWhenRemoved(t *testing.T) {
+	q := NewQueue(2, 2)
+	item := Item{TaskID: "task", SourceID: "source"}
+	if err := q.Enqueue(item); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(item); err == nil {
+		t.Fatal("duplicate task ID was queued")
+	}
+	if got := q.SourceCount("source"); got != 1 {
+		t.Fatalf("duplicate changed source count to %d", got)
+	}
+	if _, ok := q.Dequeue(); !ok {
+		t.Fatal("dequeue failed")
+	}
+	if err := q.Enqueue(item); err != nil {
+		t.Fatalf("reusing ID after removal failed: %v", err)
+	}
+}

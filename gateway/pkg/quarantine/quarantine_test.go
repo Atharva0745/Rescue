@@ -291,3 +291,65 @@ func TestEmergencyReserveConfigurationValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestReservationsHoldCapacityAndTransferIntoQuarantine(t *testing.T) {
+	p, err := NewPoolWithEmergencyReserve(3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ReserveSlot("normal-1", "normal"); err != nil {
+		t.Fatalf("reserve first non-emergency slot: %v", err)
+	}
+	if err := p.ReserveSlot("normal-2", "normal"); err != nil {
+		t.Fatalf("reserve second non-emergency slot: %v", err)
+	}
+	if err := p.ReserveSlot("normal-3", "normal"); err == nil {
+		t.Fatal("non-emergency reservations consumed the emergency floor")
+	}
+	if err := p.ReserveSlot("emergency-1", "emergency"); err != nil {
+		t.Fatalf("reserve protected emergency slot: %v", err)
+	}
+
+	if err := p.Add(entry("normal-1", "normal", "handle-1")); err != nil {
+		t.Fatalf("transfer reservation into entry: %v", err)
+	}
+	stats := p.Stats()
+	if stats.Count != 1 || stats.ReservedCount != 2 || stats.NonEmergencyReservedCount != 1 {
+		t.Fatalf("reservation transfer accounting is wrong: %+v", stats)
+	}
+	if !p.IsFull() {
+		t.Fatal("all held slots should make the pool full")
+	}
+	p.ReleaseReservation("normal-2")
+	if p.IsFull() || !p.CanAdd("normal") {
+		t.Fatal("released reservation did not return capacity")
+	}
+}
+
+func TestConcurrentReservationsCannotOverbookPool(t *testing.T) {
+	p, err := NewPoolWithEmergencyReserve(5, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successes := 0
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := p.ReserveSlot(fmt.Sprintf("task-%d", i), "normal"); err == nil {
+				mu.Lock()
+				successes++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if successes != 3 {
+		t.Fatalf("non-emergency reservations = %d, want 3", successes)
+	}
+	if got := p.Stats().NonEmergencyReservedCount; got != 3 {
+		t.Fatalf("tracked reservations = %d, want 3", got)
+	}
+}

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile Python harness
+        run: python -m compileall -q harness scripts
+      - name: Run unit tests
+        run: python -m unittest discover -s harness -p "*_test.py"
+      - name: Run transaction checker differential suite
+        run: python harness/checker_differential_test.py
+      - name: Run scheduling simulation checks
+        run: python harness/scheduling_bound_test.py
+      - name: Run admission mechanism checks
+        run: python harness/baseline_ladder_test.py
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+      - name: Run Go tests
+        working-directory: gateway
+        run: go test ./...
+      - name: Run Go race tests
+        working-directory: gateway
+        run: go test -race ./...
+      - name: Run Go vet
+        working-directory: gateway
+        run: go vet ./...

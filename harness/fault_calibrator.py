@@ -1,7 +1,10 @@
 """
-RESCUE-4 Phase 5: Fault-Rate Calibration Engine
+RESCUE-4 Phase 5: Synthetic Fault-Rate Calibration Model
+Implements a seeded simulation of cancellation/kill failures; it does not
+measure real cancellation attempts or calibrate a deployed system.
+
 Implements:
-  1. Cooperative cancellation failure measurements under attack conditions.
+  1. Synthetic cooperative cancellation failure trials under modeled attack conditions.
   2. Exact two-sided 95% Clopper-Pearson confidence interval calculation.
   3. Pre-registered decision rule (Case A, Case B, Case C) for selecting p_main.
   4. Per-stage, per-class, and kill-failure / UNCONFIRMED sensitivity analysis.

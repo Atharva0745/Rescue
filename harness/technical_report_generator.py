@@ -10,13 +10,7 @@ from typing import Any, Dict, List
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-REGISTERED_RESULTS_PATH = os.path.join(
-    PROJECT_ROOT, "config", "confirmatory_results_repaired_confirmatory.json"
-)
-PILOT_RESULTS_PATH = os.path.join(
-    PROJECT_ROOT, "config", "confirmatory_pilot_repaired.json"
-)
-LEGACY_EXPLORATORY_RESULTS_PATH = os.path.join(
+RESULTS_PATH = os.path.join(
     PROJECT_ROOT, "config", "confirmatory_results_repaired_exploratory.json"
 )
 OUTPUT_PATH = os.path.join(
@@ -50,14 +44,14 @@ def summary(values: List[float]) -> Dict[str, float]:
     }
 
 
-def generate_technical_report() -> Dict[str, Any]:
-    if not os.path.isfile(RESULTS_PATH):
-        raise FileNotFoundError(
-            "Exploratory results are missing; refusing to generate a report "
-            "from the legacy hard-coded confirmatory artifacts."
-        )
+def generate_technical_report(
+    results_path: str = RESULTS_PATH,
+    output_path: str = OUTPUT_PATH,
+) -> Dict[str, Any]:
+    if not os.path.isfile(results_path):
+        raise FileNotFoundError(f"exploratory results not found: {results_path}")
 
-    with open(RESULTS_PATH, "r", encoding="utf-8") as source:
+    with open(results_path, "r", encoding="utf-8") as source:
         results = json.load(source)
     if results.get("meta", {}).get("status") != "EXPLORATORY_NOT_CONFIRMATORY":
         raise ValueError("report input is not explicitly marked exploratory")
@@ -72,8 +66,13 @@ def generate_technical_report() -> Dict[str, Any]:
         for arm in arm_names
     }
     for record in records:
+        arms = record.get("arms")
+        if not isinstance(arms, dict):
+            raise ValueError("per-seed record is missing its arm results")
         for arm in arm_names:
-            values = record["arms"][arm]
+            if arm not in arms:
+                raise ValueError(f"per-seed record is missing arm {arm}")
+            values = arms[arm]
             arm_metrics[arm]["S_L"].append(float(values["S_L"]))
             arm_metrics[arm]["OE"].append(float(values["OE"]))
             arm_metrics[arm]["OE_norm"].append(float(values["OE_norm"]))
@@ -89,7 +88,10 @@ def generate_technical_report() -> Dict[str, Any]:
             "n_seeds": len(records),
             "interpretation": results["meta"]["interpretation"],
             "joint_claim_status": "NOT_ASSESSED",
-        },a256": file_sha256(RESULTS_PATH),
+        },
+        "provenance": {
+            "results_file": os.path.relpath(results_path, PROJECT_ROOT),
+            "results_sha256": file_sha256(results_path),
             "simulator_sha256": file_sha256(
                 os.path.join(PROJECT_ROOT, "harness", "confirmatory_simulator.py")
             ),
@@ -104,26 +106,23 @@ def generate_technical_report() -> Dict[str, Any]:
             }
             for arm, metrics in arm_metrics.items()
         },
-        "paired_contrast_summaries": results["paired_contrast_summaries"],
-        "fault_sweep": results["fault_sweep_secondary"],
+        "hypothesis_decisions": results.get("hypothesis_decisions", {}),
+        "joint_novelty_claim": results.get("joint_novelty_claim", {}),
+        "fault_sweep": results.get("fault_sweep_secondary", {}),
         "database_validation": {
             "status": "NOT_ESTABLISHED_BY_THIS_RERUN",
             "note": (
                 "The simulation is not a PostgreSQL integration test. "
-                "The existing database validator uses an in-memory mock."
+                "The database validator uses an in-memory mock."
             ),
         },
     }
 
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as output:
+    with open(output_path, "w", encoding="utf-8") as output:
         json.dump(report, output, indent=2)
-    print(f"Exploratory report written to {os.path.relpath(OUTPUT_PATH, PROJECT_ROOT)}")
+    print(f"Exploratory report written to {os.path.relpath(output_path, PROJECT_ROOT)}")
     return report
 
 
 if __name__ == "__main__":
     generate_technical_report()
-
-        "provenance": {
-            "results_file": os.path.relpath(RESULTS_PATH, PROJECT_ROOT),
-            "results_sh

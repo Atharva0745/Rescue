@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,7 @@ type Orphan struct {
 
 // ReverseAuditor compares observed runtime resources against the manifest ledger.
 type ReverseAuditor struct {
+	mu          sync.RWMutex
 	knownOwners map[string]string
 }
 
@@ -28,18 +30,21 @@ func NewReverseAuditor() *ReverseAuditor {
 }
 
 func (a *ReverseAuditor) RegisterOwner(resourceID, ownerID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.knownOwners[resourceID] = ownerID
 }
 
 func (a *ReverseAuditor) Audit(resources []Resource) []Orphan {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	out := make([]Orphan, 0)
+	now := time.Now()
 	for _, r := range resources {
-		if r.OwnerID == "" {
-			out = append(out, Orphan{ResourceID: r.ID, Kind: r.Kind, ObservedAt: time.Now()})
-			continue
-		}
-		if owner, ok := a.knownOwners[r.ID]; ok && owner != r.OwnerID {
-			out = append(out, Orphan{ResourceID: r.ID, Kind: r.Kind, ObservedAt: time.Now()})
+		owner, known := a.knownOwners[r.ID]
+		if r.ID == "" || r.OwnerID == "" || !known || owner != r.OwnerID {
+			out = append(out, Orphan{ResourceID: r.ID, Kind: r.Kind, ObservedAt: now})
 		}
 	}
 	return out

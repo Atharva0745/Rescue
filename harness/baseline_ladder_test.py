@@ -1,16 +1,10 @@
-"""
-RESCUE-4 Baseline Fidelity & Arm Ladder Validation Suite
-Validates:
-  1. DRACO Algorithmic Traceability Table (G0-C2) with Independent Review Sign-off
-  2. Graded Hotness Shedding Curve (20ms to 500ms partition latency)
-  3. Sensitivity Analysis across DRACO Detection Thresholds (P-1a & P-2 stability)
-  4. Factor Isolation Diff Review for NS -> TR -> OC (G0-C3)
-  5. 3x3 Arm Matrix Benchmark (A', D (DRACO-inspired), B across NS, TR, OC)
+"""Check DRACO-inspired policy behavior and the configured arm-factor matrix.
+
+These mechanism checks are not a reproduction of the DRACO paper and do not
+evaluate comparative performance or confirmatory hypotheses.
 """
 
-import sys
-import random
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 from admission_policy import (
     EnforcementLevel, Request, AdaptiveLimiter, DracoAdmission,
     ReservationAdmission, ExecutionArm
@@ -23,8 +17,8 @@ from admission_policy import (
 def get_draco_traceability_table() -> List[Dict[str, str]]:
     """
     Algorithmic traceability table: one row per algorithmic element of the DRACO paper,
-    with columns for code location, status (implemented, simplified, omitted),
-    and independent reviewer sign-off.
+    with columns for code location and implementation status. This table has
+    not been independently reviewed against the original paper.
     """
     return [
         {
@@ -60,7 +54,7 @@ def get_draco_traceability_table() -> List[Dict[str, str]]:
             "draco_paper_ref": "DRACO §3.1 (EWMA Filter)",
             "code_location": "admission_policy.py:DracoAdmission.update_datastore_latency",
             "status": "simplified",
-            "notes": "Direct latency sample updates; fine-grained EWMA window evaluated in sensitivity sweep"
+            "notes": "Direct latency sample updates; EWMA smoothing is not implemented"
         },
         {
             "algorithmic_element": "Kernel-level eBPF packet drop acceleration",
@@ -87,7 +81,7 @@ def get_draco_traceability_table() -> List[Dict[str, str]]:
 
 
 def verify_draco_traceability() -> Dict[str, Any]:
-    print("\n--- [G0-C2] DRACO Algorithmic Traceability & Review Sign-off ---")
+    print("\n--- DRACO-inspired Algorithmic Traceability (No Independent Review) ---")
     table = get_draco_traceability_table()
     
     implemented_cnt = sum(1 for r in table if r["status"] == "implemented")
@@ -99,16 +93,15 @@ def verify_draco_traceability() -> Dict[str, Any]:
     for row in table:
         print(f"{row['algorithmic_element']:<45} | {row['status']:<12} | {row['code_location']}")
     
-    reviewer_signoff = "Secondary Independent Reviewer: Audited traceability table, verified omission scope, confirmed 'DRACO-inspired' nomenclature per G0-C2 rule."
-    print(f"\nSign-off: {reviewer_signoff}")
+    print("\nIndependent review: NOT PERFORMED")
     
     return {
-        "status": "PASSED",
+        "status": "TRACEABILITY_RECORDED",
         "total_elements": len(table),
         "implemented": implemented_cnt,
         "simplified": simplified_cnt,
         "omitted": omitted_cnt,
-        "reviewer_signoff": reviewer_signoff
+        "independent_review": "NOT_PERFORMED"
     }
 
 
@@ -116,7 +109,7 @@ def verify_draco_traceability() -> Dict[str, Any]:
 # 2. Graded Hotness Shedding Curve (§5)
 # =====================================================================
 def run_graded_hotness_curve_test() -> Dict[str, Any]:
-    print("\n--- [G0-C2] Graded Hotness Shedding Curve (20ms to 500ms) ---")
+    print("\n--- DRACO-inspired Hotness Shedding Mechanism Check ---")
     
     latencies_to_test = [20.0, 40.0, 60.0, 80.0, 95.0, 100.0, 105.0, 120.0, 150.0, 200.0, 300.0, 500.0]
     n_requests_per_point = 200
@@ -160,60 +153,57 @@ def run_graded_hotness_curve_test() -> Dict[str, Any]:
     # 2. At >= 105ms (above 100ms threshold), admission is 0%
     assert curve_data[-1]["admission_percent"] == 0.0, "Super-threshold traffic must be shed"
     
-    print("  -> Graded shedding curve successfully demonstrates selective-dropping response.")
-    return {"status": "PASSED", "curve": curve_data}
+    print("  -> Mechanism check passed; this is not a baseline-fidelity result.")
+    return {"status": "MECHANISM_CHECKS_PASSED", "curve": curve_data}
 
 
 # =====================================================================
 # 3. Sensitivity Analysis across Detection Thresholds (§5)
 # =====================================================================
-def run_draco_threshold_sensitivity_analysis() -> Dict[str, Any]:
-    print("\n--- [G0-C2] DRACO-inspired Threshold Sensitivity Analysis (P-1a & P-2) ---")
+def run_draco_threshold_boundary_checks() -> Dict[str, Any]:
+    print("\n--- DRACO-inspired Threshold Boundary Mechanism Checks ---")
     
     thresholds = [50.0, 75.0, 100.0, 125.0, 150.0, 200.0]
-    delta_OE = 0.0328
-    delta_C = 0.0138
-    
-    # Under confirmatory benchmark:
-    # Baseline OE_norm for D-TR is ~0.068 to 0.075, B-OC is ~0.003
-    # S_L for B-OC is ~0.945 to 0.955, D-TR is ~0.895 to 0.910
-    sensitivity_results = []
-    
-    print(f"{'Threshold (ms)':<16} | {'P-1a (OE Diff > delta)':<24} | {'P-2 (SL Diff >= delta)':<24} | {'Claims Upheld'}")
-    print("-" * 80)
+    results = []
+
+    print(f"{'Threshold (ms)':<16} | {'Below threshold admitted':<24} | {'Above threshold shed'}")
+    print("-" * 72)
     
     for th in thresholds:
-        # As threshold increases, D sheds later, increasing OE_norm slightly
-        # As threshold decreases, D sheds more aggressively, hurting S_L slightly
-        oe_diff = 0.0686 + (th - 100.0) * 0.0001
-        sl_diff = 0.0342 - (th - 100.0) * 0.00005
-        
-        p1a_holds = oe_diff > delta_OE
-        p2_holds = sl_diff >= delta_C
-        both_hold = p1a_holds and p2_holds
-        
-        print(f"{th:<16.1f} | {f'{oe_diff:.4f} > {delta_OE:.4f}':<24} | {f'{sl_diff:.4f} >= {delta_C:.4f}':<24} | {both_hold}")
-        
-        sensitivity_results.append({
+        policy = DracoAdmission(num_partitions=2, hot_threshold_ms=th)
+        policy.update_datastore_latency(2, th - 1.0)
+        admitted_below, _ = policy.should_admit(
+            Request(req_id=1, req_class="C_INTERACTIVE", datastore_partition=2),
+            current_time=0.0,
+        )
+        if admitted_below:
+            policy.release_in_flight(2)
+        policy.update_datastore_latency(2, th + 1.0)
+        admitted_above, _ = policy.should_admit(
+            Request(req_id=2, req_class="C_INTERACTIVE", datastore_partition=2),
+            current_time=0.0,
+        )
+        shed_above = not admitted_above
+        print(f"{th:<16.1f} | {str(admitted_below):<24} | {shed_above}")
+
+        passed = admitted_below and shed_above
+        results.append({
             "threshold_ms": th,
-            "oe_diff": oe_diff,
-            "sl_diff": sl_diff,
-            "p1a_holds": p1a_holds,
-            "p2_holds": p2_holds,
-            "both_hold": both_hold
+            "admitted_below_threshold": admitted_below,
+            "shed_above_threshold": shed_above,
+            "passed": passed,
         })
-        
-        assert both_hold, f"Sensitivity check failed at threshold {th} ms"
-        
-    print("  -> Conclusions for P-1a and P-2 robustly hold across the full threshold sweep [50ms, 200ms].")
-    return {"status": "PASSED", "sensitivity": sensitivity_results}
+        assert passed, f"Threshold boundary check failed at {th} ms"
+
+    print("  -> Threshold boundary behavior passed; no P-1a/P-2 evidence was calculated.")
+    return {"status": "MECHANISM_CHECKS_PASSED", "checks": results}
 
 
 # =====================================================================
-# 4. Arm Ladder Factor Isolation Diff Review (G0-C3)
+# 4. Configured Arm-Factor Manifest Checks
 # =====================================================================
 def verify_arm_ladder_diff_isolation() -> Dict[str, Any]:
-    print("\n--- [G0-C3] Arm Ladder Factor Isolation Diff Review ---")
+    print("\n--- Configured Arm-Factor Manifest Checks ---")
     
     policies = [AdaptiveLimiter(), DracoAdmission(), ReservationAdmission()]
     diff_audit_results = []
@@ -247,7 +237,7 @@ def verify_arm_ladder_diff_isolation() -> Dict[str, Any]:
         })
         print(f"Policy {pol.name:<15}: NS->TR diffs: {sorted(list(diff_ns_tr))} | TR->OC diffs: {sorted(list(diff_tr_oc))} [ISOLATION VERIFIED]")
 
-    return {"status": "PASSED", "audit": diff_audit_results}
+    return {"status": "FACTOR_MANIFEST_CHECKS_PASSED", "audit": diff_audit_results}
 
 
 # =====================================================================
@@ -281,27 +271,27 @@ def run_arm_ladder_benchmark() -> Dict[str, Any]:
 
 def main():
     print("=================================================================")
-    print("       RESCUE-4 BASELINE FIDELITY & ARM LADDER SUITE             ")
+    print("       RESCUE-4 BASELINE MECHANISM CHECKS                       ")
     print("=================================================================")
     
-    # 1. DRACO Traceability Table & Sign-off (G0-C2)
-    trace_res = verify_draco_traceability()
+    # 1. Record implemented, simplified, and omitted baseline elements.
+    verify_draco_traceability()
 
-    # 2. Graded Hotness Shedding Curve (G0-C2)
-    curve_res = run_graded_hotness_curve_test()
+    # 2. Check the implemented selective-shedding behavior.
+    run_graded_hotness_curve_test()
 
-    # 3. Sensitivity Analysis across Detection Thresholds
-    sens_res = run_draco_threshold_sensitivity_analysis()
+    # 3. Check threshold boundary behavior without inferring experiment metrics.
+    run_draco_threshold_boundary_checks()
 
-    # 4. Arm Ladder Factor Isolation Diff Review (G0-C3)
-    diff_res = verify_arm_ladder_diff_isolation()
+    # 4. Check only the factor manifests configured for each arm.
+    verify_arm_ladder_diff_isolation()
 
     # 5. 3x3 Arm Matrix Execution
-    bench_res = run_arm_ladder_benchmark()
+    run_arm_ladder_benchmark()
 
     print("\n=================================================================")
-    print("  ALL FIDELITY GATES PASSED! (G0-C2 Relabeled, G0-C3 Factor Diffs)")
-    print("  Claim: 'Outperforms a DRACO-inspired policy' validated.          ")
+    print("  Mechanism and factor-manifest checks completed.")
+    print("  No DRACO reproduction, baseline comparison, or performance claim is established.")
     print("=================================================================")
 
 

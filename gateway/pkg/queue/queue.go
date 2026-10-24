@@ -7,6 +7,7 @@ package queue
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +26,7 @@ type Queue struct {
 	mu       sync.Mutex
 	items    []Item
 	capacity int
+	byTask   map[string]struct{}
 
 	// Per-source tracking for fairness (architecture §4.2)
 	perSource    map[string]int
@@ -51,6 +53,7 @@ func NewQueue(capacity int, maxPerSource int) *Queue {
 	return &Queue{
 		items:        make([]Item, 0, capacity),
 		capacity:     capacity,
+		byTask:       make(map[string]struct{}),
 		perSource:    make(map[string]int),
 		maxPerSource: maxPerSource,
 	}
@@ -59,8 +62,15 @@ func NewQueue(capacity int, maxPerSource int) *Queue {
 // Enqueue adds an item to the queue. Returns error if queue is full
 // or per-source limit exceeded.
 func (q *Queue) Enqueue(item Item) error {
+	if strings.TrimSpace(item.TaskID) == "" || strings.TrimSpace(item.SourceID) == "" {
+		return fmt.Errorf("task ID and source ID are required")
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if _, exists := q.byTask[item.TaskID]; exists {
+		q.totalRejected++
+		return fmt.Errorf("task %s is already queued", item.TaskID)
+	}
 
 	// Hard invariant: queue never exceeds capacity
 	if len(q.items) >= q.capacity {
@@ -77,6 +87,7 @@ func (q *Queue) Enqueue(item Item) error {
 
 	item.EnqueuedAt = time.Now()
 	q.items = append(q.items, item)
+	q.byTask[item.TaskID] = struct{}{}
 	q.perSource[item.SourceID]++
 	q.totalEnqueued++
 
@@ -96,13 +107,14 @@ func (q *Queue) Dequeue() (Item, bool) {
 		// Take from front (FIFO)
 		item := q.items[0]
 		q.items = q.items[1:]
+		delete(q.byTask, item.TaskID)
 		q.perSource[item.SourceID]--
 		if q.perSource[item.SourceID] <= 0 {
 			delete(q.perSource, item.SourceID)
 		}
 
 		// Skip expired items. Zero-value deadlines mean "no expiry".
-		if !item.Deadline.IsZero() && now.After(item.Deadline) {
+		if !item.Deadline.IsZero() && !now.Before(item.Deadline) {
 			q.totalExpired++
 			continue
 		}
@@ -189,6 +201,7 @@ func (q *Queue) removeAtLocked(index int) Item {
 	copy(q.items[index:], q.items[index+1:])
 	q.items[len(q.items)-1] = Item{}
 	q.items = q.items[:len(q.items)-1]
+	delete(q.byTask, item.TaskID)
 	q.perSource[item.SourceID]--
 	if q.perSource[item.SourceID] <= 0 {
 		delete(q.perSource, item.SourceID)
@@ -214,6 +227,7 @@ func (q *Queue) RemoveExpired(now time.Time) []Item {
 		if !item.Deadline.IsZero() && !now.Before(item.Deadline) {
 			expired = append(expired, item)
 			q.totalExpired++
+			delete(q.byTask, item.TaskID)
 			q.perSource[item.SourceID]--
 			if q.perSource[item.SourceID] <= 0 {
 				delete(q.perSource, item.SourceID)

@@ -72,52 +72,58 @@ func (p *Policy) EmergencyFloor() int {
 
 // CanUse reports whether a pool has capacity left under the aggregate cap.
 func (p *Policy) CanUse(poolName string, requested int) bool {
-	if requested <= 0 {
+	if requested < 0 {
+		return false
+	}
+	if requested == 0 {
 		return true
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if poolName == "" {
-		return false
-	}
-	used := 0
-	for _, value := range p.usage {
-		used += value
-	}
-	if used+requested > p.capacity {
-		return false
-	}
-	if poolName == "emergency" {
-		reserved := 0
-		for name, value := range p.usage {
-			if name == "emergency" {
-				reserved += value
-			}
-		}
-		return reserved+requested <= p.emergencyFloor || used+requested <= p.capacity
-	}
-	return true
+	return p.canUseLocked(poolName, requested)
 }
 
 // Reserve records that a pool has accepted a task.
 func (p *Policy) Reserve(poolName string, amount int) error {
-	if amount <= 0 {
-		return nil
+	if amount < 0 {
+		return fmt.Errorf("pool reservation amount must not be negative")
 	}
-	if poolName == "" {
-		return fmt.Errorf("pool name must not be empty")
+	if amount == 0 {
+		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	used := 0
-	for _, value := range p.usage {
-		used += value
-	}
-	if used+amount > p.capacity {
-		return fmt.Errorf("aggregate pool capacity exceeded: used=%d requested=%d total=%d", used, amount, p.capacity)
+	if !p.canUseLocked(poolName, amount) {
+		return fmt.Errorf("pool %s capacity or emergency reserve exceeded: requested=%d total=%d", poolName, amount, p.capacity)
 	}
 	p.usage[poolName] += amount
 	return nil
+}
+
+func (p *Policy) canUseLocked(poolName string, requested int) bool {
+	if poolName == "" {
+		return false
+	}
+	poolCapacity, registered := p.pools[poolName]
+	if !registered || p.usage[poolName]+requested > poolCapacity {
+		return false
+	}
+
+	used := 0
+	nonEmergencyUsed := 0
+	for name, value := range p.usage {
+		used += value
+		if name != "emergency" {
+			nonEmergencyUsed += value
+		}
+	}
+	if used+requested > p.capacity {
+		return false
+	}
+	if poolName != "emergency" && nonEmergencyUsed+requested > p.capacity-p.emergencyFloor {
+		return false
+	}
+	return true
 }
 
 // Release removes a reserved unit from the aggregate pool tracker.

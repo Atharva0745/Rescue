@@ -1,330 +1,156 @@
-# RESCUE-4 --- Project Context and Build Ledger
+# RESCUE project context
 
-**Document:** `docs/context.md` (Unified Project Context)  
-**Specification Version:** RESCUE-4 Technical Specification v1.5  
-**Last Updated:** 2026-10-11  
+This page records the model assumptions and repository scope. It is not a
+phase ledger. The authoritative workflow, status, validation results, and
+remaining-work order are in [`phase.md`](phase.md).
 
-> **Evidence status (2026-10-12):** The historical confirmatory outcomes and
-> Phase 9 conclusions in this file are invalidated. The simulator previously
-> replaced outcomes with arm-specific constants, and the frozen thresholds
-> came from synthetic pilot draws. A fresh pre-registration based on repaired
-> simulator pilot outcomes and a 60-seed simulation-only run are stored in
-> `config/preregistration_repaired.json` and
-> `config/confirmatory_results_repaired_confirmatory.json`. The joint claim
-> was not supported in that simulation (P-1a p=1.0); this is not evidence
-> about a deployed system. The database validator is an in-memory mock, not a
-> live PostgreSQL test.
+## Project objective
 
----
+RESCUE is a research prototype for completion-backed admission control:
+capacity remains charged until the resource owner confirms release; work whose
+release cannot be verified remains quarantined. The research also models
+admission policies, leases, fencing, and stale-write detection.
 
-## 1. Project Background & Objective
+The repository contains two separate evidence tracks:
 
-RESCUE-4 investigates whether lease-based admission control combined with owner-confirmed release (OC), executor quarantine, and database fencing can contain orphaned-work exposure (OE) and prevent stale-write commits more effectively than traditional policies that release capacity simply upon lease expiry.
+- A Python research harness for simulations, model checking, and statistical
+  analysis.
+- A Go in-memory gateway prototype with a local demo, timer-workload
+  benchmark, and package tests.
 
-### 3×3 Evaluation Matrix
-- **Admission Policies:**
-  - `A′`: Adaptive limiter (congestion-based dropping)
-  - `D`: DRACO-style datastore-aware admission (or "DRACO-inspired" if fidelity reproduction fails)
-  - `B`: RESCUE-4 reservation policy
-- **Enforcement Levels:**
-  - `NS`: No shared stage semaphore or cgroup budgets; release at expiry.
-  - `TR`: Shared stage semaphore and cgroup budgets; release at expiry.
-  - `OC`: Shared semaphore + cgroup budgets + owner confirmation before release, quarantine, and PostgreSQL database fencing.
+Neither track is a production emergency-service system. The Go prototype has
+no durable state or real operating-system/database/provider integration.
+Simulation and generated-stream mock results cannot establish live-system
+behavior.
 
----
+## Model assumptions
 
-## 2. Directory Structure & File Map
+The scheduling claims are conditional on the following assumptions. They are
+not guarantees outside the modeled scope.
 
-```
-d:/fyp/Rescue/
-├── config/
-│   ├── rescue_config.v1.0.json          # System configuration (stages, classes, limits, DB)
-│   ├── calibration_report.json          # Phase 5 fault-rate calibration report
-│   ├── preregistration_manifest.json    # Phase 6 canonical pre-registration manifest
-│   ├── confirmatory_results.json        # Phase 7 confirmatory simulation results package
-│   ├── database_testbed_report.json     # Phase 8 PostgreSQL testbed validation report
-│   └── technical_report_manifest.json   # Phase 9 reproducible technical report & artifact manifest
-├── harness/
-│   ├── dispatcher.py                    # Exact-rational dispatcher simulator
-│   ├── scheduling_bound_test.py         # Scheduling-bound test harness (T-D1, T-D2, T-D3)
-│   ├── transaction_checker.py           # Logical-decoding transaction checker & reference oracle
-│   ├── checker_differential_test.py     # 100k history differential test suite (M1-M4)
-│   ├── admission_policy.py              # Admission policies (A', D, B) & enforcement levels (NS, TR, OC)
-│   ├── baseline_ladder_test.py          # Baseline fidelity & arm ladder factor diff validation
-│   ├── fault_calibrator.py              # Fault-rate calibration engine (Clopper-Pearson, Case A/B/C)
-│   ├── preregistration_engine.py        # Pre-registration engine, power analysis & sign-flip test
-│   ├── confirmatory_simulator.py        # Confirmatory simulation experiment engine
-│   ├── database_testbed_validator.py    # PostgreSQL logical-decoding testbed validator
-│   └── technical_report_generator.py    # Technical report generator & artifact manifest engine
-├── schemas/
-│   └── run_manifest.schema.json         # JSON Schema for experimental run manifests
-├── preregistration.md                   # [Frozen] Formal statistical pre-registration specification
-├── arhitecture.md                       # Architectural component specification
-├── br.md                                # Business requirements and scope boundaries
-├── evaluation.md                        # Evaluation protocol and statistical decision rules
-├── phase.md                             # 10 execution phases and exit gate definitions
-└── context.md                           # [Active] Unified living project context & build ledger
-```
+1. **Work-conserving dispatch:** eligible queued work is not left waiting
+   while an executor is idle.
+2. **Identical executors:** executors within a stage have equal nominal
+   processing capacity.
+3. **FIFO order:** work is dispatched in first-in, first-out order within the
+   modeled queue.
+4. **Stable database primary:** the model assumes one PostgreSQL primary;
+   failover is outside the current scope.
+5. **Non-Byzantine workers:** workers may fail, pause, or become unresponsive,
+   but do not forge audit records or fence versions.
+6. **Single-gateway bounds:** deterministic scheduling bounds apply to one
+   gateway's lease ledger, not a distributed multi-gateway scheduler.
+7. **Bounded cancellation model:** cancellation failures are represented by a
+   configured probability. The existing calibrator samples that probability
+   synthetically; it does not measure real cancellation attempts.
+8. **Bounded dispatch overhead:** the mathematical model includes a declared
+   dispatch-overhead bound.
+9. **Empirical service floors:** useful-completion claims depend on measured
+   service-rate floors; the current simulation does not establish deployed
+   service rates.
 
----
+## Configuration and evidence
 
-## 3. Scope, Assumptions, and Model Invariants
+The stage/class parameters and run-manifest schema are in
+[`../config/rescue_config.v1.0.json`](../config/rescue_config.v1.0.json) and
+[`../schemas/run_manifest.schema.json`](../schemas/run_manifest.schema.json).
+These are research-model inputs, not measured production limits.
 
-### Canonical Assumptions (A1–A9)
-- **A1 (Work-Conserving Dispatch):** A stage dispatcher never idles an executor while eligible requests remain queued.
-- **A2 (Identical Executors):** Executors within a stage possess equal processing capacity under nominal conditions.
-- **A3 (FIFO Discipline per Class):** Requests within an arrival class/stage queue are dispatched in First-In, First-Out order.
-- **A4 (Database Primary Stability):** A single PostgreSQL primary receives all writes; failover is disabled and out of scope.
-- **A5 (Non-Byzantine Threat Model):** Executors may crash, pause, delay, or become zombies, but do not forge audit logs or fabricate sequence numbers.
-- **A6 (Single Gateway Bounds):** Deterministic scheduling bounds ($T_1, T_2$) apply to a single gateway's lease ledger.
-- **A7 (Bounded Cancellation Reaction):** Cooperative cancellations are processed within $T_{\text{cancel}}$; stop failures follow Bernoulli rate $p_{\text{fail}}$.
-- **A8 (Dispatch Overhead Accounting):** Context switch, enqueue, and IPC delays are bounded by positive constant $\Delta$, included in cap $\beta_s[c]$.
-- **A9 (Empirical Useful-Completion Floors):** Useful completion ($S_L$) depends on empirical service-rate floors, not static CPU quotas.
+Read [`phase.md`](phase.md) for the current status of each phase and the
+interpretation of these artifacts:
 
-### Stage Topology & Request Classes (Frozen in `config/rescue_config.v1.0.json`)
-- `S1_INGEST`: $K_1 = 8$, $\tau_1 = 1.0s$, $C_{\max, 1} = 8.0s$
-- `S2_PROCESS`: $K_2 = 16$, $\tau_2 = 2.0s$, $C_{\max, 2} = 32.0s$
-- `S3_PERSIST`: $K_3 = 4$, $\tau_3 = 0.5s$, $C_{\max, 3} = 2.0s$
-- `C_INTERACTIVE`: Wall-clock cap $0.200s$, deadline $0.500s$, $T_{\text{cancel}} = 0.050s$, overhead $\Delta = 0.005s \implies \beta_s = 0.255s$
-- `C_BATCH`: Wall-clock cap $1.000s$, deadline $3.000s$, $T_{\text{cancel}} = 0.100s$, overhead $\Delta = 0.010s \implies \beta_s = 1.110s$
-- Workloads: W1 (Bottleneck Shift), W2 (Slow Completion & Cancellation Resistance), W3 (Combined Workload with Gateway Crash).
+- Repaired simulation preregistration and result:
+  [`../config/preregistration_repaired.json`](../config/preregistration_repaired.json),
+  [`../config/confirmatory_results_repaired_confirmatory.json`](../config/confirmatory_results_repaired_confirmatory.json).
+- Historical fault-calibration output: [`../config/calibration_report.json`](../config/calibration_report.json).
+  It is generated from simulated trials and is not field calibration.
+- Mock-only database reports:
+  [`../config/database_testbed_report_mock.json`](../config/database_testbed_report_mock.json),
+  [`../config/database_testbed_report.json`](../config/database_testbed_report.json).
+- Superseded positive report manifest:
+  [`../config/technical_report_manifest.json`](../config/technical_report_manifest.json).
 
----
+Historical artifacts are kept for provenance. A file's presence or a prior
+“PASSED” label is not current validation evidence; check the environment and
+status stated in [`phase.md`](phase.md).
 
-## 4. Scheduling Bounds Review & Test Results
+## BR-F01–BR-F16 compliance matrix
 
-### 4.1. Mathematical Verification
-1. **$T_1$ (FIFO Start-Time Bound):**
-   $$S_j - t_a \le \frac{held\_live - \beta_j}{m}$$
-   *Rule:* The arriving job $j$ **must be included** in post-admission $held\_live$ when subtracting $\beta_j$ to isolate preceding queue work.
-2. **$T_2$ (Graham Drain / Makespan Bound):**
-   $$C_{\max} \le \frac{held\_live}{m} + \left(1 - \frac{1}{m}\right)\beta_{\max}$$
-   *Tightness:* Proven tight with exact equality ($0$ slack) on the analytical family $\mathcal{I}(m)$ of $m(m-1)$ unit jobs followed by 1 job of duration $m$ ($W = m^2, \beta_{\max} = m$).
-3. **Adaptive LIFO Delimitation ($T_3$):** LIFO invalidates $T_1$; starved early jobs experience unbounded delay up to timeout.
-4. **Executor Loss Delimitation ($T_4$):** Bounds require dynamic capacity tracking: $m(t) = K_{\text{avail}, s}(t) = K_s - |quarantined_s| - |killing_s|$.
+This is a requirement-level assessment against Section 7 acceptance evidence
+in [`new_br.md`](new_br.md), not an estimate of overall project completion.
+“Implementation” means relevant code exists; “test coverage” means a relevant
+test is present; neither means the acceptance criterion passed.
 
-### 4.2. Empirical Harness Verification Results (`harness/scheduling_bound_test.py`)
-- **T-D1 (1,000,000 Valid Instances):** Evaluated across 6 distributions (Uniform, Heavy-Tailed Pareto, Bimodal, All-at-Cap, Long-Job-Last, Randomized).
-  - Runtime: 18.37s ($54,442$ inst/sec).
-  - $T_1$ Violations: **0**
-  - $T_2$ Violations: **0**
-  - Minimum Slack: $\ge 0$ confirmed across all $10^6$ instances.
-- **T-D2 (Analytical Tightness):**
-  - $m=2$: $C_{\max} = 3$, Bound = 3, Slack = **0**
-  - $m=4$: $C_{\max} = 7$, Bound = 7, Slack = **0**
-  - $m=8$: $C_{\max} = 15$, Bound = 15, Slack = **0**
-  - $m=16$: $C_{\max} = 31$, Bound = 31, Slack = **0**
-- **T-D3 (Mutant Detection):**
-  - $M_{\text{NWC}}$ (Non-work-conserving): Makespan $30 > 20.0$ (Violation: $+10.0$).
-  - $M_{\text{LIFO}}$: Job 0 Start $30 > 0$ (Violation: $+30$).
-  - $M_{\text{IGN-LOSS}}$: Actual Makespan $40 > 35.0$ (Violation: $+5.0$).
+### Status definitions and assessment method
 
-### 4.3. Transaction-Level Checker Verification (`harness/checker_differential_test.py`)
-- **Differential Verification (100,000 Transactions):**
-  - **Checker vs Reference Oracle Disagreements:** **0** across 100,000 committed transactions (229,517 tx/sec).
-  - **Planted Stale-Write Detection:** **4,984 / 4,984 detected (100.0%)**.
-  - **Legitimate Late Completions Flagged:** **0 / 4,912 (0.0% false positives)**.
-- **Checker Mutants Detected:**
-  - $M_1$ (Stale write blindness): Caught (allowed stale write without error).
-  - $M_2$ (Late completion false positive): Caught (falsely rejected legitimate late commit).
-  - $M_3$ (Mixed transaction blindness): Caught (allowed combined bump + data transaction).
-  - $M_4$ (Audit/data desync blindness): Caught (allowed unaudited data mutation).
+- **Verified:** the stated BR acceptance criterion is fully exercised by an
+  automated test and that test was run successfully.
+- **Partial:** some relevant implementation or tests exist, but at least one
+  part of the BR requirement or its acceptance evidence is missing,
+  incomplete, or unverified.
+- **Missing:** no implementation of the required capability is present.
 
-### 4.4. Baseline & Arm Ladder Verification (`harness/baseline_ladder_test.py`)
-- **DRACO Traceability & Selective-Dropping Reproduction:**
-  - Evaluated on hot-datastore-node workload (Partition 1 cold @ 20ms, Partition 2 hot @ 250ms).
-  - Cold partition admitted: **100.0% (477/477)**.
-  - Hot partition admitted: **0.0% (0/523 selectively shed)**.
-  - Compared with Adaptive Limiter ($A'$): $A'$ admitted hot partition indiscriminately without spatial awareness.
-  - **Fidelity Gate G0-C2 Decision:** Relabeled strictly as **"DRACO-inspired"** per G0-C2 rule since original author code is unreleased.
-- **Factor Isolation Diff Review (Gate G0-C3):**
-  - $NS \to TR$ isolated diffs: `has_cgroup_budgets`, `has_shared_semaphore` (0 unintended factor leakage).
-  - $TR \to OC$ isolated diffs: `database_fencing_enabled`, `owner_confirmed_release`, `quarantine_enabled` (0 unintended factor leakage).
-- **3×3 Arm Matrix Benchmark:** Evaluated all 9 arms ($A'\text{-}NS/TR/OC$, $D\text{-}NS/TR/OC$, $B\text{-}NS/TR/OC$).
+The current local validation ran the Go package suite, the Go race detector,
+and `go vet`; all passed. The Python unit suite and the documented checker,
+scheduling, and baseline-mechanism checks also passed. These results validate
+the tested in-memory and simulated paths only. No requirement is marked
+**Verified** unless its complete BR acceptance evidence was run.
 
-### 4.5. Fault-Rate Calibration Results (`harness/fault_calibrator.py`)
-- **Stage B1 — Cancellation Failure Measurement (4,500 trials across 3 stages):**
-  - Global: $\hat{p} = 0.0502$, 95% Clopper–Pearson CI $[0.0440, 0.0570]$ (width $0.013$).
-  - Per-stage rates: S1\_INGEST $0.0527$, S2\_PROCESS $0.0480$, S3\_PERSIST $0.0500$ — no significant stage heterogeneity.
-  - Per-class rates: C\_INTERACTIVE $0.0450$, C\_BATCH $0.0554$ — batch class slightly elevated.
-  - Kill-path UNCONFIRMED: $2/4{,}500 = 0.044\%$ — negligible.
-- **Stage B2 — Operating Point Decision:**
-  - Decision Case: **CASE\_B** ($0.01 \le p \le 0.20$).
-  - $p_{\text{main}}$ **frozen at $0.05$** (grid point enclosed by CI).
-  - Calibration report exported to `config/calibration_report.json`.
+| Requirement and required acceptance evidence | Implementation in repository | Automated test/evidence present | Execution result and assessment | Remaining work |
+| --- | --- | --- | --- | --- |
+| **BR-F01 — Hierarchical quotas.** Cover source-group, ASN/region, and global caps before execution admission. | Partial quota accounting in [`source.go`](../gateway/pkg/source/source.go) (`CheckAdmission`, `Reserve`); intake/controller call into the registry. | [`source_test.go`](../gateway/pkg/source/source_test.go): shared group, ASN/region, contention, and overflow tests. | **Partial — package tests and race run passed.** The complete report-to-execution path and all hierarchy levels together are not covered by one acceptance test. | Add an end-to-end quota matrix covering all configured scopes, rejection before execution, releases, and aggregate contention. |
+| **BR-F02 — Probationary sources.** New/unproven source starts in probation, is placed only in sacrificial pool, and has bounded starter capacity. | [`source.go`](../gateway/pkg/source/source.go) registers new sources as probationary; [`controller.go`](../gateway/pkg/controller/controller.go) routes them to sacrificial capacity and reserves quarantine capacity before admission. | [`intake_test.go`](../gateway/pkg/intake/intake_test.go); [`controller_test.go`](../gateway/pkg/controller/controller_test.go): probation routing, quarantine reservation, cancellation release, and full-quarantine tests. | **Partial — package tests and race run passed.** The starter-share policy is still based on quarantine reservation, not an independently configured/measured starter share. | Define and test the BR starter-share bound across multiple source identities and verify none reach normal/emergency capacity before promotion. |
+| **BR-F03 — Per-resource accounting.** Ledger charges for allocated cells, database connections, and tracked downstream budgets match observed allocation. | [`controller.go`](../gateway/pkg/controller/controller.go), [`lease.go`](../gateway/pkg/lease/lease.go), and [`task.go`](../gateway/pkg/task/task.go) track worker and caller-declared handles; controller dispatch now reserves/releases the shared pool budget. Actual DB/downstream resources are not created or measured by the gateway. | [`controller_test.go`](../gateway/pkg/controller/controller_test.go): handle lifecycle and aggregate emergency-floor dispatch; [`lease_test.go`](../gateway/pkg/lease/lease_test.go): manifest membership and detached lease. | **Partial — package tests and race run passed.** Tests cover in-memory handles and configured pool accounting, not matching real allocations across required bottlenecks. | Integrate resource acquisition/release owners; compare ledger charges against real worker, DB, and downstream observations. |
+| **BR-F04 — Timeout safety.** A cancellation-ignoring handler retains its charge until verified release. | [`worker/pool.go`](../gateway/pkg/worker/pool.go) keeps a slot charged until completion acknowledgement; controller reconciles completion before releasing task accounting and records worker errors distinctly. | [`worker/pool_test.go`](../gateway/pkg/worker/pool_test.go): cancellation and unacknowledged completion tests; [`controller_test.go`](../gateway/pkg/controller/controller_test.go): resistant timeout and normal-completion cancellation classification. | **Partial — package tests and race run passed.** These exercise in-process accounting, not every resource handle or a process surviving controller restart. | Extend acceptance tests to external handles and restart/reconciliation boundaries. |
+| **BR-F05 — Independently verified release.** Each handle is independently confirmed; one unconfirmed handle keeps work quarantined and charged. | [`quarantine.go`](../gateway/pkg/quarantine/quarantine.go), [`admission.go`](../gateway/pkg/admission/admission.go), and [`controller.go`](../gateway/pkg/controller/controller.go) fail closed without a verifier and gate release on the manifest. | [`quarantine_test.go`](../gateway/pkg/quarantine/quarantine_test.go): verifier and reservation tests; [`controller_test.go`](../gateway/pkg/controller/controller_test.go): verified handle lifecycle; [`admission_test.go`](../gateway/pkg/admission/admission_test.go): nil-verifier rejection and concurrent confirmations. | **Partial — package tests and race run passed.** The verifier is a test double; no authoritative cgroup/DB/provider release verifier is implemented. | Implement trusted verifiers for each production resource type and test mixed handles against those owners. |
+| **BR-F06 — Reverse audit.** Enumerate runtime/database resources and flag a deliberately planted backend/cgroup with no ledger owner. | [`audit.go`](../gateway/pkg/audit/audit.go) compares caller-provided resources with an in-memory owner map; it does not enumerate OS or database resources. | [`audit_test.go`](../gateway/pkg/audit/audit_test.go): blank, unknown, and mismatched owner tests. | **Partial — package tests and race run passed.** The tests verify comparison logic only; they do not plant or discover a real process, cgroup, or database backend. | Add scoped Linux cgroup and PostgreSQL enumerators, then integration-test planted resources and owner mismatches. |
+| **BR-F07 — Source-specific penalties.** One attacking device must not automatically downgrade unrelated devices in its ASN. | [`source.go`](../gateway/pkg/source/source.go) stores tier by source ID and separately aggregates quota by ASN/region. No attacker penalty/downgrade policy is implemented. | No test was found that promotes/penalizes one device and asserts another device in the same ASN is unaffected. | **Partial — no acceptance test.** Per-source tier storage exists, but the punitive policy behavior is absent/unverified. | Define penalty and congestion rules; test two devices sharing an ASN under attack and assert only the targeted device's tier changes unless an aggregate cap triggers. |
+| **BR-F08 — Attested/unattested elastic lanes.** Test idle-lane borrowing and both-lanes-overloaded behavior without exceeding ASN aggregate cap. | [`pool.go`](../gateway/pkg/pool/pool.go) provides named pool policy and an aggregate cap; source tiers route to normal/emergency/sacrificial pools. No attestation lanes, borrowing policy, or ASN-to-lane coupling is implemented. | [`pool_test.go`](../gateway/pkg/pool/pool_test.go) tests emergency floor selection and aggregate capacity overflow only. | **Missing for the BR-defined lanes.** Generic pool tests do not satisfy attested/unattested borrowing acceptance evidence. | Implement attestation inputs, lane minimums, borrowing rules, and ASN cap enforcement; test idle borrowing and simultaneous overload. |
+| **BR-F09 — Emergency-floor isolation.** Quarantine across attacker groups must not consume the emergency floor. | [`quarantine.go`](../gateway/pkg/quarantine/quarantine.go) reserves capacity atomically and distinguishes entries from task-scoped held reservations; controller admission now reserves probation capacity before enqueue. [`pool.go`](../gateway/pkg/pool/pool.go) enforces the execution-lane floor at dispatch. | [`quarantine_test.go`](../gateway/pkg/quarantine/quarantine_test.go): concurrent reservation, transfer, and emergency reserve tests; [`controller_test.go`](../gateway/pkg/controller/controller_test.go): end-to-end execution floor isolation. | **Partial — package tests and race run passed.** The BR criterion’s across-attacker-group live quarantine scenario is not represented by real resources. | Add integration tests over real resource owners and multiple attacker groups while preserving aggregate `qmax`. |
+| **BR-F10 — Durable receipts.** Restart/power-loss test proves each receipt follows a durable fsynced record and fsync failure stops receipts. | [`intake.go`](../gateway/pkg/intake/intake.go) stores receipts in maps; `fsyncOK` is a constructor boolean, not a disk write or fsync operation. | No restart/power-loss or persistence test found. | **Missing.** The in-memory flag cannot establish receipt durability. | Implement persistent append/transaction semantics with real fsync and recovery; test crash points and verify every issued receipt survives restart. |
+| **BR-F11 — Idempotency and key hijack.** Same key/hash returns stored receipt; conflicting hash is rejected and logged; test replay and observed-key hijack. | [`intake.go`](../gateway/pkg/intake/intake.go) uses unambiguous source/nonce scopes, validates payload hashes and report IDs, and returns consistent receipts; state remains in-memory and conflicts are not logged. | [`intake_test.go`](../gateway/pkg/intake/intake_test.go): blank-nonce normalization, delimiter collision, payload hash, and report-ID tests; [`controller_test.go`](../gateway/pkg/controller/controller_test.go): empty/whitespace and concurrent replay without quota leakage. | **Partial — package tests and race run passed.** Key-hijack visibility, durable replay, and conflict logging are absent. | Add key-hijack and conflict-audit tests; persist idempotency state and prove replay behavior after restart. |
+| **BR-F12 — Fence correctness.** Randomized interleavings and crash points must validate shared/exclusive lock protocol for claims and bumps. | [`lease.go`](../gateway/pkg/lease/lease.go) and [`effect.go`](../gateway/pkg/effect/effect.go) maintain in-memory versions/claims. The outbox enforces state transitions and claimant/token/fence checks; no database locking protocol is implemented. Python [`transaction_checker.py`](../harness/transaction_checker.py) models validation. | [`effect_test.go`](../gateway/pkg/effect/effect_test.go): sent/failed replay, duplicate IDs, expired claim-token, and fence bump tests; Python [`checker_differential_test.py`](../harness/checker_differential_test.py): 100,000 histories. | **Partial — Go suite, race suite, vet, and Python model suite passed.** No DB lock interleavings, durable sender crash points, or live stale-sender test. | Implement transactional PostgreSQL fence/claim locking and test randomized concurrent claims, bump races, and crashes before/after commit/send. |
+| **BR-F13 — Effect contracts.** Each effect declares provider-keyed, naturally idempotent, or non-idempotent semantics; sender tests measure duplicate window. | [`effect.go`](../gateway/pkg/effect/effect.go) now enforces local claim/fence/state transitions but has no contract type, provider sender, or reconciliation integration. | [`effect_test.go`](../gateway/pkg/effect/effect_test.go) tests effect lifecycle and stale claim rejection. | **Partial — package tests and race run passed.** Contract declaration and provider acceptance tests remain absent. | Define typed effect contracts and provider interfaces; implement sender/reconciliation behavior and test retries, crashes, idempotency retention, and duplicate windows. |
+| **BR-F14 — Equal-budget evaluation.** Run B1, B2, and ZAC-fixed with per-resource budget differences within the preregistered tolerance. | Python harness compares A′/D-inspired/B admission and NS/TR/OC factors; this is not B1/B2/ZAC-fixed. No per-resource physical-budget checker is implemented. | No CI budget-tolerance check or equal-budget acceptance test found. | **Missing.** Existing arm-manifest checks do not measure or enforce equal physical budgets. | Implement the required baselines, resource budget manifests/checks, and a CI gate using a justified, frozen tolerance. |
+| **BR-F15 — Reproducible attacker search.** Preserve separate pilot/confirmatory seeds, search logs, and a planted-attacker recovery report. | [`preregistration_engine.py`](../harness/preregistration_engine.py) and result artifacts preserve simulation seed blocks; no bounded attacker-search implementation or planted-attacker validation was found. | The repaired simulation artifacts distinguish a simulation registration/result, but no attacker search log or planted-attacker test/report exists. | **Partial.** Seeded simulation exists; the BR-defined search and validation workflow is absent. | Implement bounded search with deterministic seeds, complete logs, repeated starts, held-out evaluation, and planted-attacker recovery criteria. |
+| **BR-F16 — ZAC-adaptive remains exploratory.** Reports distinguish exploratory from confirmatory until the estimator and comparison protocol are validated. | The simulation/report generator labels exploratory outputs; [`phase.md`](phase.md) records the repaired joint claim as unsupported. No validated ZAC-adaptive estimator/comparison is present. | [`technical_report_generator.py`](../harness/technical_report_generator.py) refuses non-exploratory input; its tests cover exploratory status and refusal of registered input. The artifacts in `config/` preserve the simulation result. | **Partial — reporting guard tested; no adaptive estimator validation.** The Python unit tests passed in the preceding workflow update; this does not validate an estimator. | Keep adaptive results explicitly exploratory; implement and independently validate the estimator and comparison protocol before creating confirmatory claims. |
 
-### 4.6. Statistical Pre-Registration Verification (`harness/preregistration_engine.py`)
-- **Closed Hypothesis Family (P-1a, P-1b, P-2, P-3, P-4a, P-4b):** All 6 primary hypotheses frozen with explicit directions, contrasts, and workloads.
-- **Effect Size Threshold Calibration ($N_{\text{pilot}} = 12$):**
-  - $\delta_{OE} = \max(0.01, 0.5 \times \min(\mu_{\text{pilot}}(OE))) = \mathbf{0.0328}$ (min pilot mean: $0.0656$ on P-4a).
-  - $\delta_C = \max(0.005, 0.5 \times \min(\mu_{\text{pilot}}(S_L))) = \mathbf{0.0138}$ (min pilot mean: $0.0275$ on P-4b).
-  - $c_w$ (stale write weight) frozen at $\mathbf{10.0}$.
-  - Non-inferiority margin for P-3 frozen at $\mathbf{-0.0300}$.
-- **Permutation Test & Assumption Diagnostics:**
-  - One-sided paired sign-flip permutation test (100,000 flips) with threshold $\delta$ shifted into the null.
-  - Diagnostics on 12 pilot differences: all 6 contrasts passed symmetry ($|\text{skewness}| < 1.0$), zero $3\sigma$ outliers, non-zero variability.
-  - Pre-registered fallback: Wilcoxon signed-rank test.
-- **Sample Size & Joint Power ($10,000$ Monte Carlo simulations):**
-  - Maximum paired standard deviation: $\sigma_{\max} = 0.0273$ (contrast P-1a).
-  - Formula sample size: $N = 25$ (within registered $[20, 60]$ range).
-  - Joint novelty power at $N = 25$: $\mathbf{0.9987}$ (exceeds $\ge 0.80$ requirement; individual powers: P-1a: 1.0, P-1b: 1.0, P-2: 0.9999, P-3: 1.0, P-4a: 1.0, P-4b: 0.9988).
-- **Decision Rules:**
-  - Joint claim: Intersection-Union Test (all 6 hypotheses must reject).
-  - Individual claims: Holm step-down adjustment.
-- **Seed Manifest & Pre-Registration Hash:**
-  - 25 seed blocks generated with randomized arm orders, decoupled trace seeds, and fault seeds.
-  - **Canonical SHA-256 Hash:** `219fcd691d3c650505ec9dd6e47e2a46d5e17546c83bbca0812ee89f3080f73c` recorded in `config/preregistration_manifest.json` and `preregistration.md`.
-  - **Gate G0-C6: PASSED.** Frozen before any confirmatory trace generation.
+### Assessment summary
 
-### 4.7. Repaired Simulation-Only Results
+- **Verified:** 0 of 16 requirements against their complete Section 7
+  acceptance evidence in this environment.
+- **Partial:** 13 requirements have some related implementation or evidence,
+  but their acceptance criteria are incomplete or unverified.
+- **Missing:** BR-F08's required attested/unattested lanes, BR-F10 durable
+  receipts, and BR-F14 equal-budget baseline evaluation are not implemented
+  to the stated requirement.
 
-The repaired simulator pilot was used to derive thresholds without changing
-the registered rules; its pilot data, simulator hash, thresholds, and disjoint
-confirmatory seed blocks are recorded in `config/preregistration_repaired.json`.
-The subsequent 60-seed simulation-only run is in
-`config/confirmatory_results_repaired_confirmatory.json`. The registered
-one-sided tests did not support the joint claim: P-1a had mean contrast
-$-0.01841$ against threshold $+0.01000$ and $p=1.0$. No conclusion about a
-deployed system or live database follows from this simplified Python model.
+These counts are a classification of this matrix, not a completion percentage.
+They must be revisited as acceptance evidence and missing integrations are
+implemented. See [`phase.md`](phase.md) for current validation and the
+project-level sequence and live-testbed blockers.
 
-### 4.7.1. Historical Confirmatory Simulation Results (Invalidated)
+## Correctness review of implemented paths
 
-The values below are retained for audit history only. The repaired exploratory
-rerun and its limitations are recorded separately in
-`config/confirmatory_results_repaired_confirmatory.json`.
-- **Execution Provenance:** All 25 pre-registered seeds executed across arms ($A'\text{-}TR$, $D\text{-}TR$, $D\text{-}OC$, $B\text{-}TR$, $B\text{-}OC$) in strict accordance with the frozen manifest. Exclusions: 0.
-- **Hypothesis Decisions ($N=25$ Paired Seeds, 100,000 Sign Flips per Contrast):**
-  - **P-1a ($OE_{\text{norm}}$ vs $D\text{-}TR$):** Mean diff $= +0.09923 > 0.0328$, $95\%$ CI $[+0.09775, +0.10086]$, raw $p = 0.000010$, Holm $p = 0.000060$ $\implies$ **REJECT $H_0$**.
-  - **P-1b ($OE_{\text{norm}}$ vs $A'\text{-}TR$):** Mean diff $= +0.12423 > 0.0328$, $95\%$ CI $[+0.12305, +0.12546]$, raw $p = 0.000010$, Holm $p = 0.000050$ $\implies$ **REJECT $H_0$**.
-  - **P-2 ($S_L$ vs $D\text{-}TR$):** Mean diff $= +0.04000 \ge 0.0138$, $95\%$ CI $[+0.04000, +0.04000]$, raw $p = 0.000010$, Holm $p = 0.000040$ $\implies$ **REJECT $H_0$**.
-  - **P-3 ($S_L$ Guardrail vs $D\text{-}OC$):** Mean diff $= +0.05500 \ge -0.0300$, $95\%$ CI $[+0.05500, +0.05500]$, raw $p = 0.000010$, Holm $p = 0.000030$ $\implies$ **REJECT $H_0$**.
-  - **P-4a ($OE_{\text{norm}}$ vs $B\text{-}TR$):** Mean diff $= +0.10450 > 0.0328$, $95\%$ CI $[+0.10252, +0.10665]$, raw $p = 0.000010$, Holm $p = 0.000020$ $\implies$ **REJECT $H_0$**.
-  - **P-4b ($S_L$ vs $B\text{-}TR$):** Mean diff $= +0.03000 \ge 0.0138$, $95\%$ CI $[+0.03000, +0.03000]$, raw $p = 0.000010$, Holm $p = 0.000010$ $\implies$ **REJECT $H_0$**.
-- **Joint Novelty Claim:** **ALL SIX PRIMARY HYPOTHESES REJECT** under Intersection-Union Test. Containment benefit supported at $p_{\text{main}} = 0.05$.
-- **Write Safety Component:** $B\text{-}OC$ committed $0$ stale writes ($100\%$ fencing efficacy across all 25 seeds), whereas TR arms committed $4$ to $18$ stale writes per seed.
-- **Secondary Fault Sweep ($p \in \{0.00, 0.01, 0.05, 0.20\}$):**
-  - Zero-fault overhead check: $OE_{\text{norm}} = 0.00000$ at $p=0.0\%$ (zero overhead).
-  - Crossover point: $p^* \approx 0.30\%$ fault rate.
-- **Results Artifact:** Results package exported to `config/confirmatory_results.json`.
+The following defects were fixed and verified with regression tests in the
+current worktree. Full Go unit, race-detector, and vet runs passed; detailed
+commands and Python validation results are in [`phase.md`](phase.md).
 
-### 4.8. Historical Mock Validator Results (Not a PostgreSQL Test)
+| Defect fixed | Change and regression evidence |
+| --- | --- |
+| Outbox replay, ID replacement, and stale claim completion (BR-F12/F13) | [`effect.go`](../gateway/pkg/effect/effect.go) now rejects conflicting duplicate IDs, returns detached effects, enforces valid claim states, binds completion to claimant/fence/monotonic claim token, invalidates pending work on fence bump, and requires explicit retry for failed effects. [`effect_test.go`](../gateway/pkg/effect/effect_test.go) covers replay, expiration, stale tokens, and fences. |
+| Reverse-audit false negatives and concurrent map access (BR-F06) | [`audit.go`](../gateway/pkg/audit/audit.go) now flags unknown resource IDs, blank owners, and owner mismatches, and protects its owner map with a read/write lock. Tests cover unknown/mismatched owners. |
+| Ineffective emergency floor and unconnected pool accounting (BR-F03/F08/F09) | [`pool.go`](../gateway/pkg/pool/pool.go) enforces per-lane and aggregate caps while reserving the emergency floor; [`controller.go`](../gateway/pkg/controller/controller.go) reserves lane capacity on dispatch and releases it only after handle-backed task release. Unit and controller tests prove non-emergency work cannot consume protected capacity and emergency work can use it. |
+| Probationary admission overbooking quarantine capacity (BR-F02/F09) | [`quarantine.go`](../gateway/pkg/quarantine/quarantine.go) supports atomic task-scoped capacity reservations. The controller reserves before enqueuing probationary work and releases or transfers the reservation on cancellation, expiry, completion, or quarantine. Concurrent, transfer, and controller lifecycle tests cover the behavior. |
+| Empty-nonce quota leak and ambiguous idempotency scopes (BR-F01/F11) | [`intake.go`](../gateway/pkg/intake/intake.go) normalizes blank source/nonce values consistently, hashes length-prefixed fields, verifies payload hashes, and rejects report-ID reuse. [`AcceptReport`](../gateway/pkg/controller/controller.go) serializes receipt admission and releases its transient quota charge. Tests cover blank/whitespace replay, delimiter collisions, concurrent duplicate reports, and zero remaining usage. |
+| Admission verifier fallback and mutable result exposure (BR-F05) | [`admission.go`](../gateway/pkg/admission/admission.go) now fails closed when no trusted verifier is configured, rejects empty/duplicate manifests, serializes state changes, returns detached records, and safely resumes settlement after concurrent confirmations. Tests cover nil verifier, caller mutation, and concurrent confirmations. |
+| Source selection data race (BR-F02/F07/F08) | [`source.go`](../gateway/pkg/source/source.go) copies tier/pool fields and the policy pointer while holding the registry lock. Controller routing now uses the detached source snapshot and its shared policy. Concurrent promotion/selection/policy replacement is exercised by a race test. |
+| Duplicate queue IDs and worker lifecycle misreporting | [`queue.go`](../gateway/pkg/queue/queue.go) rejects duplicate/blank IDs and maintains the active-ID index through dequeue/removal/expiry. Controller cleanup no longer marks normal completion as cancellation, and worker errors enter an explicit `FAILED` transition before release. Regression tests cover duplicate IDs, completion flags, and failed work. |
+| Unsafe legacy helper behavior | The incomplete queue-only [`EnqueueTask`](../gateway/pkg/controller/controller.go) now returns an explicit migration error instead of success-shaped incomplete state. Standalone [`LeaseTask`](../gateway/pkg/controller/controller.go) reports reservation/lease failures, returns detached leases, and pairs with `ReleaseLease` to release the tracked source charge. |
 
-The following historical counts came from generated stream text and an
-in-memory model. They do not represent PostgreSQL transactions, replication,
-locking, or trigger execution.
-
-- **Pinned Testbed Configuration:** PostgreSQL 16.3 + `test_decoding`, `stream-changes=0` (commit-record order only), `include-xids=1`, `include-timestamp=1`, `skip-empty-xacts=1`, `synchronous_commit=on`.
-- **Covered Tables:** `fence_log`, `audit`, and data tables `account_ledger`, `resource_registry`.
-- **Validation Suites & Results:**
-  - **Suite 1 (Commit-Order Differential vs Oracle):** 10,000 committed stream transactions across 3 gateways evaluated $\implies$ **0 disagreements** with `ReferenceOracle` (throughput: 49,795 tx/sec).
-  - **Suite 2 (Planted Stale Commits & Late Completions):**
-    - 1,000 planted stale writes $\implies$ **1,000 / 1,000 detected (100.0%)**.
-    - 1,000 legitimate late completions $\implies$ **0 / 1,000 false positives (0.0%)**.
-  - **Suite 3 (Adversarial Edge-Case Mutations):**
-    - Mixed transactions (bump + data mutation in single tx) $\implies$ 100% flagged and rejected (`FLAG_MIXED_TRANSACTION`).
-    - Bypass writes without audit record $\implies$ 100% flagged and rejected (`FLAG_UNAUDITED_MUTATION`).
-    - Orphan audit records without data mutation $\implies$ 100% flagged and rejected (`FLAG_ORPHAN_AUDIT`).
-    - Non-monotonic incarnation bumps $\implies$ 100% flagged and rejected (`FLAG_NON_MONOTONE_BUMP`).
-    - Unknown gateway mutations $\implies$ 100% flagged and rejected (`FLAG_UNKNOWN_GATEWAY`).
-  - **Suite 4 (Crash Consistency, Snapshot Restoration, Slot Lag):**
-    - Checkpoint snapshot persisted at LSN `25107511`; exact state restored post-crash.
-    - 10 replayed committed transactions from WAL $\implies$ **10/10 deduplicated (100.0%)**.
-    - 20 transactions accumulated behind lagging replication slot $\implies$ **20/20 caught up cleanly without corruption**.
-  - **Suite 5 (Decoder Mutant Sensitivity):**
-    - Mutants $M_1$ (stale blindness), $M_2$ (late completion FP), $M_3$ (mixed blindness), $M_4$ (audit/data desync) $\implies$ **All 4 caught**.
-- **Exit Gate C1-Equivalent:** **NOT ESTABLISHED**. A live PostgreSQL test remains required.
-- **Historical Artifact:** `config/database_testbed_report.json` is marked invalidated; reruns write `config/database_testbed_report_mock.json`.
-
-### 4.9. Historical Technical Report (Invalidated)
-
-The following report conclusions and metrics are invalidated with the prior
-simulator and mock database test. The current data-driven, simulation-only
-report is `config/technical_report_repaired_confirmatory.json`; its registered
-joint claim was not supported.
-
-- **Executive Conclusion:** **NOT ASSESSED**. No confirmatory joint claim is made.
-- **Hypothesis Decisions (Holm Adjusted):**
-  - All six primary hypotheses ($P\text{-}1a, P\text{-}1b, P\text{-}2, P\text{-}3, P\text{-}4a, P\text{-}4b$) reject at $\alpha = 0.05$ with Holm-adjusted $p \le 0.000060$.
-  - $P\text{-}4a$ and $P\text{-}4b$ isolate that Owner-Confirmed release ($B\text{-}OC$) provides statistically significant reductions in orphaned-work exposure ($\Delta OE_{\text{norm}} = +0.10450 > 0.0328$) and improvements in useful completion ($\Delta S_L = +0.0300 \ge 0.0138$) beyond the semaphore/budget alone ($B\text{-}TR$).
-  - $P\text{-}3$ satisfies the no-attack overhead / non-inferiority guardrail against $D\text{-}OC$ ($\Delta S_L = +0.05500 \ge -0.0300$).
-- **Disaggregated OE Components Analysis:**
-  - $B\text{-}OC$ and $D\text{-}OC$ committed **$0$ stale writes** ($100\%$ fencing efficacy; $c_w W_{\text{stale}} = 0.0$).
-  - $TR$ arms committed between $12$ and $18$ stale writes per seed, incurring heavy penalties ($120.0$ to $180.0$).
-  - Aggregate $OE$: $B\text{-}OC$ achieved mean $34.65$ ($OE_{\text{norm}} = 0.020630$) vs $B\text{-}TR$ mean $210.22$ ($OE_{\text{norm}} = 0.125130$), $D\text{-}TR$ mean $201.36$ ($OE_{\text{norm}} = 0.119860$), and $A'\text{-}TR$ mean $243.36$ ($OE_{\text{norm}} = 0.144858$).
-- **Cryptographic Provenance:** 100% SHA-256 hashes generated across all project files; pre-registration hash verified (`219fcd691d3c6505...`).
-- **Historical Artifact:** `config/technical_report_manifest.json` is marked superseded; the current report is `config/technical_report_repaired_confirmatory.json`.
-
----
-
-## 5. Historical Parameter Freeze Ledger
-
-The values below document the superseded preregistration and are not the
-parameters for the repaired study. The active thresholds and 60-seed schedule
-are in `config/preregistration_repaired.json`.
-
-| Parameter | Value | State | Target Milestone & Freezing Rule |
-| :--- | :--- | :--- | :--- |
-| **Executor capacities $K_s$** | `8, 16, 4` | **FROZEN** | Initial Configuration Freeze |
-| **Stage time slices $\tau_s$** | `1.0s, 2.0s, 0.5s` | **FROZEN** | Initial Configuration Freeze |
-| **Class caps $\beta_s[c]$** | `0.255s, 1.110s` | **FROZEN** | Initial Configuration Freeze |
-| **Runtime stack** | Python 3.11+ Exact-Rational | **FROZEN** | Initial Configuration Freeze |
-| **PostgreSQL testbed** | PG 16.3 + `test_decoding` | **FROZEN** | Initial Configuration Freeze |
-| **Permutation count** | 100,000 flips | **FROZEN** | Initial Configuration Freeze |
-| **T1 / T2 inequalities** | Verified & Tight | **FROZEN** | Proof Review & Harness Verification |
-| **$p_{\text{main}}$ (fault rate)** | $0.05$ | **FROZEN** | 95% Clopper–Pearson CI $[0.0440, 0.0570]$ on 4,500 trials; CASE\_B grid selection |
-| **$\delta_{\text{OE}}$ (effect size threshold)** | $0.0328$ | **FROZEN** | Pre-registration pilot variance rule ($\min \mu_{\text{pilot}} = 0.0656$) |
-| **$\delta_{C}$ (success threshold)** | $0.0138$ | **FROZEN** | Pre-registration pilot variance rule ($\min \mu_{\text{pilot}} = 0.0275$) |
-| **$c_w$ (stale write weight)** | $10.0$ | **FROZEN** | Pre-registration manifest |
-| **Seed sample size $N$** | $25$ | **FROZEN** | Pre-registration power calculation ($0.9987 \ge 0.80$ power) |
-| **Pre-registration Hash** | `219fcd691d3c...` | **FROZEN** | Canonical SHA-256 manifest hash |
-
----
-
-## 6. Project Milestone Status
-
-The phase 0–6 completion entries below are historical records, not an
-independent verification of every listed claim. Current study status is
-summarized at the top of this document and in the repaired artifacts.
-
-- **Scope & Configuration Freeze:** **COMPLETED** (Config and schema verified).
-- **Proof Review of T1/T2:** **COMPLETED** (Verified, tightness proved, limitations recorded).
-- **Scheduling-Bound Harness:** **COMPLETED** ($10^6$ instances, T-D1, T-D2, T-D3 verified; G0-C5 passed on T-D1–D3 (simulation); T-D4 staged testbed with A1–A9 monitors executed and verified with 0 violations; T-D4 recorded as NOT RUN on simulation ledger).
-- **Transaction-Level Checker:** **COMPLETED** (100k differential histories, 0 disagreements, mutants M1--M4 caught).
-- **Baseline & Arm Ladder:** **COMPLETED** (DRACO selective dropping reproduced, G0-C2 relabeled as "D (DRACO-inspired)", G0-C3 factor diffs verified, graded hotness curve and threshold sensitivity verified).
-- **Fault-Rate Calibration:** **COMPLETED** ($p_{\text{main}} = 0.05$ frozen; CASE\_B; 4,500 trials; G0-C4 passed).
-- **Pre-Registration:** **COMPLETED** (repaired simulator-pilot preregistration, 60 independent seed blocks, SHA-256 `089cee59cb6dd9780ec0a2c5b6b5d9c2b6f650341eb5ce568ef01b35df66d131`).
-- **Confirmatory Simulation:** **COMPLETED, SIMULATION ONLY** (P-1a failed; the registered joint claim was not supported).
-- **PostgreSQL Testbed:** **NOT RUN** (validator is an in-memory mock).
-- **Analysis & Reporting:** **COMPLETED, SIMULATION ONLY** (`config/technical_report_repaired_confirmatory.json`; no deployed-system claim).
-
----
-
-## 7. Historical Architectural Compliance Claims (`arhitecture.md`)
-
-This table records prior documentation assertions; those assertions are not
-independent evidence of compliance. In particular, the database validator is
-mock-only and the confirmatory simulation does not validate a deployed system.
-
-| Section in `arhitecture.md` | Architectural Invariant | Current Implementation | Compliance Status |
-| :--- | :--- | :--- | :---: |
-| **Section 1 & 2** | Separation of admission policy from release mechanism and write safety | Prior documentation claimed separation of admission, quarantine, and fencing | **NOT INDEPENDENTLY VERIFIED** |
-| **Section 3** | 3×3 Arm Ladder: A′/D/B × NS/TR/OC | Prior configuration claim; see model and simulator scope limitations | **NOT INDEPENDENTLY VERIFIED** |
-| **Section 4** | Lease and capacity accounting: $held_s, held\_live_s, K_{\text{avail}, s}$ | Prior dispatcher/accounting claim | **NOT INDEPENDENTLY VERIFIED** |
-| **Section 5** | Quarantine: executor removal from available capacity | Quarantine behavior is tested in the repaired simulator only | **SIMULATION ONLY** |
-| **Section 6** | Fencing schema: `(inc, epoch)`, `FOR SHARE`, no mixed transactions | Fencing behavior is tested in the repaired simulator; no live database validation | **SIMULATION ONLY** |
-| **Section 7** | Validate-before-apply logical decoding checker | Prior checker claim; current database validator is an in-memory mock | **NOT INDEPENDENTLY VERIFIED** |
-| **Section 7** | Client ack is not safety oracle | Prior late-completion test claim | **NOT INDEPENDENTLY VERIFIED** |
-| **Section 2 & 9** | Cooperative cancel measurement; fault-rate sweep $p \in \{0, 1\%, 5\%, 20\%\}$; registered calibration rules | Prior calibration claim; does not validate production behavior | **NOT INDEPENDENTLY VERIFIED** |
-| **Section 11** | Boundary separation: proofs, simulation, and testbed | Mathematical and simulation artifacts do not establish live testbed behavior | **PARTIALLY VERIFIED; NO LIVE TESTBED** |
-| **Section 5 & 8 (evaluation.md)** | Pre-registration freeze before confirmatory traces (G0-C6) | Repaired manifest: 60 seeds, thresholds `0.01` / `0.005`, SHA-256 `089cee59cb6dd9780ec0a2c5b6b5d9c2b6f650341eb5ce568ef01b35df66d131` | **REPAIRED REGISTRATION** |
-| **Section 6 & 9 (evaluation.md)** | Confirmatory simulation execution (Phase 7) | Registered simulation completed; P-1a failed and joint claim not supported | **SIMULATION ONLY; CLAIM NOT SUPPORTED** |
-| **Section 7 & 10 (evaluation.md)** | PostgreSQL Testbed Validation (Phase 8 / Gate C1) | Validator uses generated stream text and an in-memory model, not PostgreSQL | **NOT RUN** |
-| **Section 11 & 12 (evaluation.md)** | Final Evaluation Report & Evaluation Status Matrix (Phase 9) | Current report summarizes repaired simulation results and limitations | **SIMULATION ONLY** |
-
----
-
-## 8. Threats to Validity and Scope Delimitation
-
-1. **Baseline Fidelity & Naming Boundary:** The baseline arm D is strictly designated as **"D (DRACO-inspired)"** because full source code from the original DRACO authors is not publicly released. Per Gate G0-C2, our implementation reproduces DRACO's core qualitative property—selective dropping of requests targeting congested/hot datastore partitions while preserving healthy partition traffic. Non-essential elements (e.g. kernel eBPF packet-drop acceleration, distributed Paxos replica consensus, and cross-rack work-stealing) are omitted. All claims strictly state that RESCUE-4 *"outperforms a DRACO-inspired policy"* rather than original DRACO. Sensitivity analysis across detection thresholds from 50ms to 200ms confirms that both P-1a and P-2 conclusions remain robust.
-2. **Scheduling Bounds Scope:** Deterministic bounds $T_1$ and $T_2$ hold strictly under assumptions A1–A9. Unmodeled executor loss and adaptive LIFO scheduling are explicitly out of scope, as proven by counterexamples in mutant suite T-D3.
-3. **Database Safety Separation:** Database write safety is enforced preventatively by PostgreSQL 16.3 role isolation, in-transaction `SELECT ... FOR SHARE` verification, and bump conflict serialization (`fenced_write()`), leaving 0 stale writes committed. Logical decoding operates as an independent detective control. Fencing claims in the discrete-event simulator are designated as "SIMULATION-ONLY".
+These fixes make the covered in-memory paths correct under the tests; they do
+not complete all BR requirements. Durable receipts, real process/database
+enumeration, authoritative resource verifiers, PostgreSQL fencing, provider
+effect contracts, and equal-budget evaluation remain unimplemented. “Partial”
+in the matrix means implementation and test coverage exist but the complete
+acceptance evidence is still outstanding.

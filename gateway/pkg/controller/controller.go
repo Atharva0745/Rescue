@@ -30,8 +30,10 @@ var ErrNoWorkerSlots = errors.New("no free worker slots")
 type Controller struct {
 	mu            sync.Mutex
 	dispatchMu    sync.Mutex
+	intakeMu      sync.Mutex
 	IntakeLog     *intake.IntakeLog
 	Source        *source.Registry
+	poolPolicy    *pool.Policy
 	LeaseService  *lease.Service
 	Queue         *queue.Queue
 	Quarantine    *quarantine.Pool
@@ -42,9 +44,13 @@ type Controller struct {
 	tasks         map[string]*task.Task
 	pending       map[string]workRequest
 	taskPools     map[string]string
+	poolCharges   map[string]string
+	legacyCharges map[string]string
 	workerHandles map[string]string
+	workCancels   map[string]context.CancelFunc
 	released      map[string]bool
 	nextHandleID  uint64
+	nextReportID  uint64
 	blockedFront  uint64
 }
 
@@ -87,6 +93,9 @@ func NewControllerWithEmergencyQuarantineReserve(capacity, maxPerSource, qmax, e
 // NewControllerWithHandleReleaseVerifier configures the trusted verifier used
 // to authenticate evidence before a resource handle can be confirmed.
 func NewControllerWithHandleReleaseVerifier(capacity, maxPerSource, qmax, emergencyReserve int, verifier quarantine.HandleReleaseVerifier) (*Controller, error) {
+	if capacity < 1 {
+		return nil, fmt.Errorf("controller capacity must be at least 1")
+	}
 	qpool, err := quarantine.NewPoolWithVerifier(qmax, emergencyReserve, verifier)
 	if err != nil {
 		return nil, err
@@ -104,6 +113,7 @@ func newController(capacity, maxPerSource, qmax int, qpool *quarantine.Pool) *Co
 	return &Controller{
 		IntakeLog:     intake.NewIntakeLog(true),
 		Source:        reg,
+		poolPolicy:    policy,
 		LeaseService:  lease.NewService(),
 		Queue:         queue.NewQueue(capacity, maxPerSource),
 		Quarantine:    qpool,
@@ -114,13 +124,17 @@ func newController(capacity, maxPerSource, qmax int, qpool *quarantine.Pool) *Co
 		tasks:         make(map[string]*task.Task),
 		pending:       make(map[string]workRequest),
 		taskPools:     make(map[string]string),
+		poolCharges:   make(map[string]string),
+		legacyCharges: make(map[string]string),
 		workerHandles: make(map[string]string),
+		workCancels:   make(map[string]context.CancelFunc),
 		released:      make(map[string]bool),
 	}
 }
 
 // RegisterPool adds a named execution pool.
 func (c *Controller) RegisterPool(name string, capacity int) error {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("pool name must not be empty")
 	}
@@ -132,6 +146,7 @@ func (c *Controller) RegisterPool(name string, capacity int) error {
 	if _, exists := c.Pools[name]; exists {
 		return fmt.Errorf("pool %s is already registered", name)
 	}
+	c.poolPolicy.RegisterPool(name, capacity)
 	c.Pools[name] = worker.NewPool(name, capacity, capacity*2)
 	return nil
 }
@@ -140,7 +155,7 @@ func (c *Controller) RegisterPool(name string, capacity int) error {
 // queue. New sources are confined to the sacrificial pool regardless of the
 // requested pool; callers must register that pool before dispatch.
 func (c *Controller) EnqueueWork(req WorkRequest) error {
-	if req.TaskID == "" || req.SourceID == "" {
+	if strings.TrimSpace(req.TaskID) == "" || strings.TrimSpace(req.SourceID) == "" {
 		return fmt.Errorf("task ID and source ID are required")
 	}
 	if req.Work == nil {
@@ -152,7 +167,7 @@ func (c *Controller) EnqueueWork(req WorkRequest) error {
 	if !req.Deadline.IsZero() && !time.Now().Before(req.Deadline) {
 		return fmt.Errorf("task %s deadline has already passed", req.TaskID)
 	}
-	if req.Scope == "" {
+	if strings.TrimSpace(req.Scope) == "" {
 		req.Scope = req.TaskID
 	}
 
@@ -170,23 +185,20 @@ func (c *Controller) EnqueueWork(req WorkRequest) error {
 		if region == "" {
 			region = "unknown-region"
 		}
-		c.Source.RegisterSource(req.SourceID, group, asn, region)
-		sourceState = c.Source.Get(req.SourceID)
+		sourceState = c.Source.RegisterSource(req.SourceID, group, asn, region)
 	}
-	if c.Source.IsProbation(req.SourceID) {
+	probationary := sourceState.Probation
+	if probationary {
 		req.Pool = "sacrificial"
-		if !c.Quarantine.CanAdd(req.Pool) {
-			return fmt.Errorf("probationary admission paused: no quarantine capacity for pool %s", req.Pool)
-		}
 	} else {
-		req.Pool = c.Source.ChoosePool(req.SourceID, req.Pool)
+		req.Pool = c.poolPolicy.ChoosePool(string(sourceState.Tier), req.Pool)
 	}
 	if req.Pool == "" {
 		return fmt.Errorf("task %s has no execution pool", req.TaskID)
 	}
 	seenHandles := make(map[string]struct{}, len(req.RequiredHandles))
 	for _, handle := range req.RequiredHandles {
-		if handle == "" {
+		if strings.TrimSpace(handle) == "" {
 			return fmt.Errorf("task %s has an empty resource handle", req.TaskID)
 		}
 		if _, duplicate := seenHandles[handle]; duplicate {
@@ -217,7 +229,16 @@ func (c *Controller) EnqueueWork(req WorkRequest) error {
 		c.Source.Release(req.SourceID, 1)
 		return fmt.Errorf("task %s already exists", req.TaskID)
 	}
+	if probationary {
+		if err := c.Quarantine.ReserveSlot(req.TaskID, req.Pool); err != nil {
+			c.Source.Release(req.SourceID, 1)
+			return fmt.Errorf("probationary admission paused: %w", err)
+		}
+	}
 	if err := c.Queue.Enqueue(queue.Item{TaskID: req.TaskID, SourceID: req.SourceID, Deadline: req.Deadline}); err != nil {
+		if probationary {
+			c.Quarantine.ReleaseReservation(req.TaskID)
+		}
 		c.Source.Release(req.SourceID, 1)
 		return err
 	}
@@ -278,7 +299,8 @@ func (c *Controller) DispatchNext() (string, error) {
 	freePools := make(map[string]bool)
 	for _, candidate := range candidates {
 		if _, checked := freePools[candidate.req.pool]; !checked {
-			freePools[candidate.req.pool] = candidate.pool.FreeSlots() > 0
+			freePools[candidate.req.pool] = candidate.pool.FreeSlots() > 0 &&
+				c.poolPolicy.CanUse(candidate.req.pool, 1)
 		}
 	}
 	hasFreePool := false
@@ -307,6 +329,15 @@ func (c *Controller) DispatchNext() (string, error) {
 	}
 	candidate := candidates[selected]
 	item, req, t, pool := candidate.item, candidate.req, candidate.task, candidate.pool
+	if err := c.poolPolicy.Reserve(req.pool, 1); err != nil {
+		return "", err
+	}
+	poolChargeHeld := true
+	defer func() {
+		if poolChargeHeld {
+			c.poolPolicy.Release(req.pool, 1)
+		}
+	}()
 	removed, ok := c.Queue.RemoveForDispatch(item.TaskID)
 	if !ok || removed.TaskID != item.TaskID {
 		return "", fmt.Errorf("queued task %s was removed before dispatch", item.TaskID)
@@ -345,7 +376,14 @@ func (c *Controller) DispatchNext() (string, error) {
 		seen[handle] = struct{}{}
 	}
 
-	l := c.LeaseService.Begin(item.TaskID, t.SourceID, req.scope, req.pool, handles, req.deadline)
+	l, err := c.LeaseService.Begin(item.TaskID, t.SourceID, req.scope, req.pool, handles, req.deadline)
+	if err != nil {
+		return "", fmt.Errorf("create lease for task %s: %w", item.TaskID, err)
+	}
+	c.mu.Lock()
+	c.poolCharges[item.TaskID] = req.pool
+	c.mu.Unlock()
+	poolChargeHeld = false
 	t.ConfigureLease(l.ID, req.pool, l.Fence.Inc)
 	for _, handle := range req.requiredHandles {
 		t.AddHandle(task.HandleExternalResource, handle)
@@ -362,15 +400,14 @@ func (c *Controller) DispatchNext() (string, error) {
 	}
 	c.mu.Lock()
 	c.workerHandles[item.TaskID] = workerHandle
+	c.workCancels[item.TaskID] = cancel
 	c.mu.Unlock()
-	work := func(workCtx context.Context) error {
-		defer cancel()
-		return req.work(workCtx)
-	}
+	work := req.work
 	if _, err := pool.SubmitWithHandle(item.TaskID, workerHandle, ctx, work); err != nil {
 		cancel()
 		c.mu.Lock()
 		delete(c.workerHandles, item.TaskID)
+		delete(c.workCancels, item.TaskID)
 		c.mu.Unlock()
 		_ = c.LeaseService.ConfirmHandle(l.ID, workerHandle)
 		_ = t.ConfirmHandle(workerHandle)
@@ -447,6 +484,7 @@ func (c *Controller) sweepExpiredQueuedLocked(now time.Time) error {
 			}
 			continue
 		}
+		c.Quarantine.ReleaseReservation(t.ID)
 		c.Source.Release(t.SourceID, 1)
 	}
 	return firstErr
@@ -536,6 +574,7 @@ func (c *Controller) reconcileCompletion(event worker.CompletionEvent) error {
 	t := c.tasks[event.TaskID]
 	workerHandle := c.workerHandles[event.TaskID]
 	poolName := c.taskPools[event.TaskID]
+	cancelWork := c.workCancels[event.TaskID]
 	c.mu.Unlock()
 	if t == nil || workerHandle == "" {
 		return fmt.Errorf("completion for unknown or undispatched task %s", event.TaskID)
@@ -557,6 +596,9 @@ func (c *Controller) reconcileCompletion(event worker.CompletionEvent) error {
 		if event.TimedOut || state == task.StateCancelling {
 			next = task.StateExpired
 			reason = "worker stopped after deadline or cancellation"
+		} else if event.Err != nil {
+			next = task.StateFailed
+			reason = fmt.Sprintf("worker returned an error: %v", event.Err)
 		}
 		if err := t.TransitionTo(next, reason); err != nil {
 			return err
@@ -578,7 +620,11 @@ func (c *Controller) reconcileCompletion(event worker.CompletionEvent) error {
 	}
 	c.mu.Lock()
 	delete(c.workerHandles, event.TaskID)
+	delete(c.workCancels, event.TaskID)
 	c.mu.Unlock()
+	if cancelWork != nil {
+		cancelWork()
+	}
 	return nil
 }
 
@@ -630,6 +676,7 @@ func (c *Controller) CancelTask(taskID string) error {
 	if queued && c.Queue.Remove(taskID) {
 		delete(c.pending, taskID)
 		c.mu.Unlock()
+		c.Quarantine.ReleaseReservation(taskID)
 		if err := t.TransitionTo(task.StateReleased, "cancelled before dispatch"); err != nil {
 			return err
 		}
@@ -706,10 +753,15 @@ func (c *Controller) releaseTask(t *task.Task) error {
 	if err := c.LeaseService.Release(t.LeaseIdentity()); err != nil {
 		return err
 	}
+	c.Quarantine.ReleaseReservation(t.ID)
 	if c.Quarantine.Contains(t.ID) {
 		if err := c.Quarantine.Release(t.ID); err != nil {
 			return err
 		}
+	}
+	if poolName, charged := c.poolCharges[t.ID]; charged {
+		c.poolPolicy.Release(poolName, 1)
+		delete(c.poolCharges, t.ID)
 	}
 	state := t.GetState()
 	if state != task.StateReleased {
@@ -735,6 +787,9 @@ func (c *Controller) TaskSnapshot(taskID string) (task.Snapshot, bool) {
 
 // AcceptReport performs intake validation, source registration, and receipt issuance.
 func (c *Controller) AcceptReport(sourceID, nonce string, payload []byte) (intake.Receipt, error) {
+	c.intakeMu.Lock()
+	defer c.intakeMu.Unlock()
+
 	if strings.TrimSpace(sourceID) == "" {
 		sourceID = "anonymous"
 	}
@@ -745,44 +800,73 @@ func (c *Controller) AcceptReport(sourceID, nonce string, payload []byte) (intak
 		}
 		return intake.Receipt{}, fmt.Errorf("%w: key %s has conflicting payloads", intake.ErrConflict, intake.IdempotencyScope(sourceID, nonce))
 	}
-	if err := c.Source.CheckAdmission(sourceID, 1); err != nil {
+	if c.Source.Get(sourceID) == nil {
 		c.Source.RegisterSource(sourceID, sourceID, "unknown-asn", "unknown-region")
-		if err := c.Source.CheckAdmission(sourceID, 1); err != nil {
-			return intake.Receipt{}, err
-		}
+	}
+	if err := c.Source.CheckAdmission(sourceID, 1); err != nil {
+		return intake.Receipt{}, err
 	}
 	if err := c.Source.Reserve(sourceID, 1); err != nil {
 		return intake.Receipt{}, err
 	}
+	defer c.Source.Release(sourceID, 1)
 
+	now := time.Now()
 	r := intake.Report{
-		ID:          fmt.Sprintf("report-%d", time.Now().UnixNano()),
+		ID:          fmt.Sprintf("report-%d-%d", now.UnixNano(), atomic.AddUint64(&c.nextReportID, 1)),
 		SourceKey:   sourceID,
 		Nonce:       nonce,
 		PayloadHash: intake.PayloadHash(payload),
 		Payload:     append([]byte(nil), payload...),
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
 	}
 	receipt, err := c.IntakeLog.Accept(r)
 	if err != nil {
-		c.Source.Release(sourceID, 1)
 		return intake.Receipt{}, err
 	}
 	return receipt, nil
 }
 
-// EnqueueTask records a task in the bounded queue and applies source accounting.
+// EnqueueTask is retained to return an actionable error for callers of the
+// incomplete pre-worker API. Executable work must use EnqueueWork.
 func (c *Controller) EnqueueTask(taskID, sourceID string) error {
-	if err := c.Source.CheckAdmission(sourceID, 1); err != nil {
-		return err
-	}
-	return c.Queue.Enqueue(queue.Item{TaskID: taskID, SourceID: sourceID, Deadline: time.Now().Add(5 * time.Second)})
+	return fmt.Errorf("EnqueueTask cannot create executable work; use EnqueueWork with a complete handle manifest")
 }
 
 // LeaseTask creates a lease and marks the source as holding capacity.
-func (c *Controller) LeaseTask(taskID, sourceID, pool string, handles []string) *lease.Lease {
-	c.Source.Reserve(sourceID, 1)
-	return c.LeaseService.Begin(taskID, sourceID, "default-scope", pool, handles, time.Now().Add(30*time.Second))
+func (c *Controller) LeaseTask(taskID, sourceID, pool string, handles []string) (*lease.Lease, error) {
+	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(sourceID) == "" {
+		return nil, fmt.Errorf("task ID and source ID are required")
+	}
+	if err := c.Source.Reserve(sourceID, 1); err != nil {
+		return nil, err
+	}
+	created, err := c.LeaseService.Begin(taskID, sourceID, "default-scope", pool, handles, time.Now().Add(30*time.Second))
+	if err != nil {
+		c.Source.Release(sourceID, 1)
+		return nil, err
+	}
+	c.mu.Lock()
+	c.legacyCharges[created.ID] = sourceID
+	c.mu.Unlock()
+	return created, nil
+}
+
+// ReleaseLease releases a standalone lease and its source charge after all
+// handles in the lease manifest have been confirmed.
+func (c *Controller) ReleaseLease(leaseID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sourceID, tracked := c.legacyCharges[leaseID]
+	if !tracked {
+		return fmt.Errorf("lease %s is not tracked as a standalone controller lease", leaseID)
+	}
+	if err := c.LeaseService.Release(leaseID); err != nil {
+		return err
+	}
+	delete(c.legacyCharges, leaseID)
+	c.Source.Release(sourceID, 1)
+	return nil
 }
 
 // QuarantineTask adds a task to the quarantine pool. Callers must explicitly
@@ -806,6 +890,6 @@ func (c *Controller) RecordRuntimeAudit(resources []audit.Resource) []audit.Orph
 }
 
 // RegisterEffect adds a fenced effect to the outbox.
-func (c *Controller) RegisterEffect(id, scope, payload string) *effect.Effect {
+func (c *Controller) RegisterEffect(id, scope, payload string) (*effect.Effect, error) {
 	return c.Outbox.Add(id, scope, payload)
 }

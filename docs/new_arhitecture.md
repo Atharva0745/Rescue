@@ -5,10 +5,11 @@
 **System:** Completion-Backed Admission Control for Emergency
 Communication Gateways under Adversarial Overload
 
-> This document translates the supplied RESCUE design report into an
-> implementation-oriented architecture. It does not imply the system has
-> been built. The report states that the complete design is not
-> implemented and that no confirmatory experimental results exist.
+> This document is a design proposal, not an implementation or validation
+> report. The repaired simulation result is simulation-only and did not
+> support the registered joint claim; no live database/testbed evidence is
+> established. Current status and evidence boundaries are maintained in
+> [`phase.md`](phase.md).
 
 ## 1. Architectural Intent
 
@@ -208,6 +209,11 @@ A lease expiry marks work as potentially zombie; it does not release
 capacity. Each lease has an epoch/fence version and a manifest of owned
 handles. New lease issuance must commit the fence bump before the new
 lease is usable.
+
+The in-memory task lifecycle also records a worker-reported error as
+`FAILED`. This is an outcome state, not a lease release: the lease remains
+charged until every required handle is independently confirmed, then the task
+can move to `RELEASED`; otherwise it remains quarantined.
 
 ### 5.3 Resource manifest and charges
 

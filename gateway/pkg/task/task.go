@@ -2,7 +2,7 @@
 //
 // Task states follow the architecture doc §5.2:
 //
-//	QUEUED → ACTIVE → COMPLETED | EXPIRED → RELEASED | QUARANTINED
+//	QUEUED → ACTIVE → COMPLETED | EXPIRED | FAILED → RELEASED | QUARANTINED
 //
 // A task is the unit of work created when a request is admitted.
 // Each task has a unique ID, a lease, a resource manifest (set of handles),
@@ -26,6 +26,7 @@ const (
 	StateCancelling               // Cancel requested, awaiting confirmation
 	StateQuarantined              // One or more handles unconfirmed after expiry
 	StateReleased                 // All handles confirmed gone, capacity freed
+	StateFailed                   // Worker returned an error; resource release is still required
 )
 
 func (s State) String() string {
@@ -44,6 +45,8 @@ func (s State) String() string {
 		return "QUARANTINED"
 	case StateReleased:
 		return "RELEASED"
+	case StateFailed:
+		return "FAILED"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(s))
 	}
@@ -134,6 +137,7 @@ type Task struct {
 	Deadline    time.Time `json:"deadline"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
 	ExpiredAt   time.Time `json:"expired_at,omitempty"`
+	FailedAt    time.Time `json:"failed_at,omitempty"`
 
 	// Work characteristics
 	WorkDuration     time.Duration `json:"work_duration"`      // Configured backend work time
@@ -166,6 +170,7 @@ type Snapshot struct {
 	Deadline         time.Time        `json:"deadline"`
 	CompletedAt      time.Time        `json:"completed_at,omitempty"`
 	ExpiredAt        time.Time        `json:"expired_at,omitempty"`
+	FailedAt         time.Time        `json:"failed_at,omitempty"`
 	WorkDuration     time.Duration    `json:"work_duration"`
 	SurvivesTimeout  bool             `json:"survives_timeout"`
 	CancelResistant  bool             `json:"cancel_resistant"`
@@ -201,11 +206,12 @@ func New(id, leaseID, sourceID string, deadline time.Time, workDuration time.Dur
 // Architecture doc §5.2 lease lifecycle + additional operational states.
 var validTransitions = map[State][]State{
 	StateQueued:      {StateActive, StateExpired, StateReleased}, // Can expire or be rejected before dispatch
-	StateActive:      {StateCompleted, StateExpired, StateCancelling},
+	StateActive:      {StateCompleted, StateExpired, StateFailed, StateCancelling},
 	StateCompleted:   {StateReleased, StateQuarantined}, // Unconfirmed resources remain charged
 	StateExpired:     {StateReleased, StateQuarantined}, // Handles confirmed or not
-	StateCancelling:  {StateCompleted, StateExpired, StateQuarantined},
+	StateCancelling:  {StateCompleted, StateExpired, StateFailed, StateQuarantined},
 	StateQuarantined: {StateReleased, StateQuarantined}, // May re-enter on partial confirmation
+	StateFailed:      {StateReleased, StateQuarantined},
 	// StateReleased is terminal
 }
 
@@ -254,6 +260,8 @@ func (t *Task) transitionToLocked(newState State, reason string) error {
 		t.CompletedAt = now
 	case StateExpired:
 		t.ExpiredAt = now
+	case StateFailed:
+		t.FailedAt = now
 	}
 
 	return nil
@@ -416,6 +424,7 @@ func (t *Task) Snapshot() Snapshot {
 		Deadline:         t.Deadline,
 		CompletedAt:      t.CompletedAt,
 		ExpiredAt:        t.ExpiredAt,
+		FailedAt:         t.FailedAt,
 		WorkDuration:     t.WorkDuration,
 		SurvivesTimeout:  t.SurvivesTimeout,
 		CancelResistant:  t.CancelResistant,

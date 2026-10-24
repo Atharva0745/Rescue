@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -85,6 +86,9 @@ func TestWorkLifecycleReleasesAfterWorkerConfirmation(t *testing.T) {
 	if c.Source.Get("new-source").Usage["global"] != 0 {
 		t.Fatal("source charge was not released after worker confirmation")
 	}
+	if got := c.Quarantine.Stats().ReservedCount; got != 0 {
+		t.Fatalf("successful completion leaked a quarantine reservation: %d", got)
+	}
 }
 
 func TestDispatchKeepsWorkContextAliveUntilHandlerReturns(t *testing.T) {
@@ -116,6 +120,68 @@ func TestDispatchKeepsWorkContextAliveUntilHandlerReturns(t *testing.T) {
 	snapshot := waitForState(t, c, "context-lifetime", task.StateReleased)
 	if snapshot.CompletedAt.Sub(started) < workDuration {
 		t.Fatalf("work context was canceled before the handler completed: elapsed=%s", snapshot.CompletedAt.Sub(started))
+	}
+}
+
+func TestSuccessfulCompletionIsNotMarkedCancelled(t *testing.T) {
+	c := newTestController(t)
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "natural-completion",
+		SourceID:               "natural-completion-source",
+		Deadline:               time.Now().Add(time.Second),
+		HandleManifestComplete: true,
+		Work:                   func(context.Context) error { return nil },
+	}); err != nil {
+		t.Fatalf("enqueue work: %v", err)
+	}
+	if _, err := c.DispatchNext(); err != nil {
+		t.Fatalf("dispatch work: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		events := c.Pools["sacrificial"].PendingCompletions()
+		if len(events) > 0 {
+			if events[0].Cancelled || events[0].TimedOut {
+				t.Fatalf("normal completion was marked cancelled or timed out: %+v", events[0])
+			}
+			if err := c.ReconcileCompletions(); err != nil {
+				t.Fatalf("reconcile completion: %v", err)
+			}
+			if snapshot, ok := c.TaskSnapshot("natural-completion"); !ok || snapshot.State != task.StateReleased {
+				t.Fatalf("task did not release after normal completion: %+v", snapshot)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("worker completion was not recorded")
+}
+
+func TestWorkerErrorsAreNotReportedAsSuccessfulCompletion(t *testing.T) {
+	c := newTestController(t)
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "failed-work",
+		SourceID:               "failed-work-source",
+		HandleManifestComplete: true,
+		Work: func(context.Context) error {
+			return fmt.Errorf("backend failure")
+		},
+	}); err != nil {
+		t.Fatalf("enqueue work: %v", err)
+	}
+	if _, err := c.DispatchNext(); err != nil {
+		t.Fatalf("dispatch work: %v", err)
+	}
+	snapshot := waitForState(t, c, "failed-work", task.StateReleased)
+	foundFailure := false
+	for _, transition := range snapshot.Transitions {
+		if transition.To == task.StateFailed {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("worker error was recorded as successful work: %+v", snapshot.Transitions)
 	}
 }
 
@@ -419,7 +485,7 @@ func TestSweepExpiredQueuedReleasesSourceChargeOnce(t *testing.T) {
 }
 
 func TestConcurrentDispatchersNeverSubmitPastPoolCapacity(t *testing.T) {
-	c, err := NewControllerWithHandleReleaseVerifier(32, 32, 8, 1, testHandleReleaseVerifier{})
+	c, err := NewControllerWithHandleReleaseVerifier(32, 32, 16, 1, testHandleReleaseVerifier{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,6 +605,9 @@ func TestFullQuarantinePausesProbationAndRetainsExistingCharges(t *testing.T) {
 		t.Fatalf("dispatch probation work: %v", err)
 	}
 	waitForState(t, c, "task-6a", task.StateQuarantined)
+	if stats := c.Quarantine.Stats(); stats.Count != 1 || stats.ReservedCount != 0 {
+		t.Fatalf("probation reservation did not transfer to quarantine: %+v", stats)
+	}
 
 	if err := c.EnqueueWork(WorkRequest{
 		TaskID:                 "task-6b",
@@ -592,5 +661,224 @@ func TestFullQuarantinePausesProbationAndRetainsExistingCharges(t *testing.T) {
 	}
 	if err := c.ConfirmHandle("task-6c", "db-6c", releaseEvidence("task-6c", "db-6c")); err != nil {
 		t.Fatalf("confirm second external handle: %v", err)
+	}
+}
+
+func TestControllerPolicyProtectsEmergencyCapacity(t *testing.T) {
+	c, err := NewControllerWithHandleReleaseVerifier(4, 8, 8, 1, testHandleReleaseVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RegisterPool("normal", 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RegisterPool("emergency", 4); err != nil {
+		t.Fatal(err)
+	}
+	c.Source.RegisterSource("normal-source", "normal-group", "normal-asn", "normal-region")
+	c.Source.Promote("normal-source", source.TierNormal, "normal")
+
+	finish := make(chan struct{})
+	started := make(chan string, 4)
+	for i := 0; i < 4; i++ {
+		taskID := fmt.Sprintf("normal-%d", i)
+		if err := c.EnqueueWork(WorkRequest{
+			TaskID:                 taskID,
+			SourceID:               "normal-source",
+			HandleManifestComplete: true,
+			Work: func(context.Context) error {
+				started <- taskID
+				<-finish
+				return nil
+			},
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", taskID, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := c.DispatchNext(); err != nil {
+			t.Fatalf("dispatch normal work %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		<-started
+	}
+	if _, err := c.DispatchNext(); !errors.Is(err, ErrNoWorkerSlots) {
+		t.Fatalf("normal work crossed the emergency floor: %v", err)
+	}
+	if got := c.Queue.Len(); got != 1 {
+		t.Fatalf("blocked normal task was removed from queue: length=%d", got)
+	}
+
+	c.Source.RegisterSource("emergency-source", "emergency-group", "emergency-asn", "emergency-region")
+	c.Source.Promote("emergency-source", source.TierEmergency, "emergency")
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "emergency-1",
+		SourceID:               "emergency-source",
+		HandleManifestComplete: true,
+		Work: func(context.Context) error {
+			started <- "emergency-1"
+			<-finish
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("enqueue emergency work: %v", err)
+	}
+	if id, err := c.DispatchNext(); err != nil || id != "emergency-1" {
+		t.Fatalf("dispatch protected emergency work: id=%q err=%v", id, err)
+	}
+	if got := <-started; got != "emergency-1" {
+		t.Fatalf("started task = %s, want emergency-1", got)
+	}
+
+	close(finish)
+	for _, taskID := range []string{"normal-0", "normal-1", "normal-2", "emergency-1"} {
+		waitForState(t, c, taskID, task.StateReleased)
+	}
+	if _, err := c.DispatchNext(); err != nil {
+		t.Fatalf("normal work did not regain capacity after release: %v", err)
+	}
+	waitForState(t, c, "normal-3", task.StateReleased)
+}
+
+func TestAcceptReportIdempotencyDoesNotLeakQuota(t *testing.T) {
+	c := newTestController(t)
+	first, err := c.AcceptReport("report-source", "", []byte("payload"))
+	if err != nil {
+		t.Fatalf("accept report: %v", err)
+	}
+	second, err := c.AcceptReport("report-source", "  ", []byte("payload"))
+	if err != nil {
+		t.Fatalf("accept duplicate report: %v", err)
+	}
+	if first.ReportID != second.ReportID {
+		t.Fatalf("blank nonce replay returned different receipts: %s != %s", first.ReportID, second.ReportID)
+	}
+	if got := c.Source.Get("report-source").Usage["global"]; got != 0 {
+		t.Fatalf("receipt acceptance leaked source quota: usage=%d", got)
+	}
+	if _, err := c.AcceptReport("report-source", "", []byte("different")); err == nil {
+		t.Fatal("conflicting duplicate report was accepted")
+	}
+}
+
+func TestConcurrentDuplicateReportsShareReceiptAndDoNotLeakQuota(t *testing.T) {
+	c := newTestController(t)
+	const requests = 20
+	receipts := make(chan string, requests)
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			receipt, err := c.AcceptReport("concurrent-report-source", "same-nonce", []byte("same-payload"))
+			if err != nil {
+				errs <- err
+				return
+			}
+			receipts <- receipt.ReportID
+		}()
+	}
+	wg.Wait()
+	close(receipts)
+	close(errs)
+	for err := range errs {
+		t.Errorf("accept concurrent duplicate: %v", err)
+	}
+	var reportID string
+	for got := range receipts {
+		if reportID == "" {
+			reportID = got
+		}
+		if got != reportID {
+			t.Errorf("duplicate returned receipt %s; expected %s", got, reportID)
+		}
+	}
+	if got := c.IntakeLog.Count(); got != 1 {
+		t.Fatalf("receipt count = %d, want 1", got)
+	}
+	if got := c.Source.Get("concurrent-report-source").Usage["global"]; got != 0 {
+		t.Fatalf("concurrent receipt acceptance leaked source quota: usage=%d", got)
+	}
+}
+
+func TestStandaloneLeaseReportsReservationAndReleaseErrors(t *testing.T) {
+	c := newTestController(t)
+	if _, err := c.LeaseTask("unknown-source-task", "unknown-source", "normal", []string{"resource"}); err == nil {
+		t.Fatal("standalone lease accepted an unregistered source")
+	}
+	c.Source.RegisterSource("standalone-source", "standalone-group", "standalone-asn", "standalone-region")
+	leaseRecord, err := c.LeaseTask("standalone-task", "standalone-source", "normal", []string{"resource"})
+	if err != nil {
+		t.Fatalf("create standalone lease: %v", err)
+	}
+	if err := c.ReleaseLease(leaseRecord.ID); err == nil {
+		t.Fatal("standalone lease released with an unconfirmed handle")
+	}
+	if err := c.LeaseService.ConfirmHandle(leaseRecord.ID, "resource"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReleaseLease(leaseRecord.ID); err != nil {
+		t.Fatalf("release confirmed standalone lease: %v", err)
+	}
+	if got := c.Source.Get("standalone-source").Usage["global"]; got != 0 {
+		t.Fatalf("standalone source charge remained after release: %d", got)
+	}
+}
+
+func TestIncompleteEnqueueTaskAPIFailsExplicitly(t *testing.T) {
+	c := newTestController(t)
+	if err := c.EnqueueTask("task", "source"); err == nil {
+		t.Fatal("incomplete queue-only API reported success")
+	}
+	if c.Queue.Len() != 0 {
+		t.Fatal("rejected legacy enqueue changed queue state")
+	}
+}
+
+func TestErrorReturningConstructorRejectsInvalidExecutionCapacity(t *testing.T) {
+	if _, err := NewControllerWithHandleReleaseVerifier(0, 1, 1, 0, testHandleReleaseVerifier{}); err == nil {
+		t.Fatal("constructor accepted zero execution capacity")
+	}
+}
+
+func TestProbationaryAdmissionsReserveQuarantineCapacity(t *testing.T) {
+	c, err := NewControllerWithHandleReleaseVerifier(8, 4, 2, 1, testHandleReleaseVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RegisterPool("sacrificial", 2); err != nil {
+		t.Fatal(err)
+	}
+	request := func(taskID string) WorkRequest {
+		return WorkRequest{
+			TaskID:                 taskID,
+			SourceID:               taskID + "-source",
+			HandleManifestComplete: true,
+			Work:                   func(context.Context) error { return nil },
+		}
+	}
+
+	if err := c.EnqueueWork(request("reserved-1")); err != nil {
+		t.Fatalf("first probationary admission: %v", err)
+	}
+	if got := c.Quarantine.Stats().ReservedCount; got != 1 {
+		t.Fatalf("quarantine reservations = %d, want 1", got)
+	}
+	if err := c.EnqueueWork(request("reserved-2")); err == nil {
+		t.Fatal("second probationary admission exceeded reserved quarantine capacity")
+	}
+	if err := c.CancelTask("reserved-1"); err != nil {
+		t.Fatalf("cancel first queued task: %v", err)
+	}
+	if got := c.Quarantine.Stats().ReservedCount; got != 0 {
+		t.Fatalf("cancellation leaked quarantine reservation: %d", got)
+	}
+	if err := c.EnqueueWork(request("reserved-2")); err != nil {
+		t.Fatalf("admission after reservation release: %v", err)
+	}
+	if err := c.CancelTask("reserved-2"); err != nil {
+		t.Fatalf("cancel second queued task: %v", err)
 	}
 }

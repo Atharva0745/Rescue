@@ -254,13 +254,12 @@ def evaluate_mutants() -> Dict[str, Any]:
 
 # Formal Scope & Review Specifications (§4)
 SCOPE_TEXT = "T1/T2 hold under A1–A9; adaptive LIFO and unmodeled executor loss are out of scope."
-REVIEW_SPEC = "Formal Independent Review: Re-derivation and proof verified by second reviewer under assumptions A1–A9."
 
 
 class AssumptionMonitors:
     """
-    Evaluates assumptions A1 through A9 for a staged execution trial.
-    A trial that violates an assumption (e.g. OS scheduling jitter pushing a job past beta_cap)
+    Evaluates assumptions A1 through A9 in a synthetic execution model.
+    A trial that violates an assumption
     is reported as an assumption violation, NOT counted as a bound failure.
     """
     def __init__(self, m: int, beta_cap: float, delta_max: float):
@@ -296,10 +295,10 @@ class AssumptionMonitors:
         return all_green, status, reason
 
 
-def run_staged_td4_cgroup_testbed(n_trials: int = 50, m: int = 4, beta_cap_ms: float = 2.0, delta_max_ms: float = 0.5) -> Dict[str, Any]:
-    print("\n--- [T-D4] Staged CGroup Testbed with Assumption Monitors A1–A9 ---")
+def run_synthetic_assumption_monitor_check(n_trials: int = 50, m: int = 4, beta_cap_ms: float = 2.0, delta_max_ms: float = 0.5) -> Dict[str, Any]:
+    print("\n--- Synthetic Assumption-Monitor Check (Not Live T-D4) ---")
     print(f"Scope: {SCOPE_TEXT}")
-    print("Pass Criterion: 0 bound violations across valid trials (monitors A1–A9 green); slack distribution reported.")
+    print("No Linux cgroup, process execution, or wall-clock measurement is performed.")
 
     beta_cap = beta_cap_ms / 1000.0
     delta_max = delta_max_ms / 1000.0
@@ -389,7 +388,7 @@ def run_staged_td4_cgroup_testbed(n_trials: int = 50, m: int = 4, beta_cap_ms: f
         if not t2_valid_trial:
             t2_violations += 1
 
-    print(f"Staged Trials Run: {n_trials} | Green Assumptions: {green_trials} | Assumption Violations: {assumption_violations}")
+    print(f"Synthetic Trials Run: {n_trials} | Green Assumptions: {green_trials} | Assumption Violations: {assumption_violations}")
     print(f"T1 Bound Violations (Green trials): {t1_violations}")
     print(f"T2 Bound Violations (Green trials): {t2_violations}")
 
@@ -400,19 +399,19 @@ def run_staged_td4_cgroup_testbed(n_trials: int = 50, m: int = 4, beta_cap_ms: f
     }
     print(f"T2 Slack Distribution: Min={slack_stats['min_slack_sec']*1000:.3f}ms, Mean={slack_stats['mean_slack_sec']*1000:.3f}ms, Max={slack_stats['max_slack_sec']*1000:.3f}ms")
 
-    assert t1_violations == 0, f"Found {t1_violations} T1 violations in staged testbed!"
-    assert t2_violations == 0, f"Found {t2_violations} T2 violations in staged testbed!"
+    assert t1_violations == 0, f"Found {t1_violations} T1 violations in synthetic monitor check!"
+    assert t2_violations == 0, f"Found {t2_violations} T2 violations in synthetic monitor check!"
 
     return {
-        "status": "PASSED",
+        "status": "SIMULATION_ONLY",
         "n_trials": n_trials,
         "green_trials": green_trials,
         "assumption_violations": assumption_violations,
         "t1_violations": t1_violations,
         "t2_violations": t2_violations,
         "slack_stats": slack_stats,
-        "scope": SCOPE_TEXT,
-        "pass_criterion": "0 bound violations across valid trials with A1-A9 green"
+        "scope": "Synthetic timing and assumption-monitor model; no Linux cgroup test was performed.",
+        "pass_criterion": "0 bound violations across valid synthetic trials with A1-A9 green"
     }
 
 
@@ -438,10 +437,10 @@ def get_scheduling_simulation_ledger() -> List[Dict[str, Any]]:
         },
         {
             "test_id": "T-D4",
-            "suite": "simulation_ledger",
+            "suite": "live_testbed",
             "status": "NOT RUN",
-            "description": "Recorded as NOT RUN on simulation ledger; executed on staged cgroup testbed with A1–A9 monitors",
-            "notes": "G0-C5 passed on T-D1–D3 (simulation)"
+            "description": "A real Linux cgroup test has not been run; the synthetic assumption-monitor exercise is not T-D4 evidence.",
+            "notes": "T-D1–T-D3 are simulation checks only."
         }
     ]
 
@@ -450,5 +449,4 @@ if __name__ == "__main__":
     verify_tightness_instances([2, 4, 8, 16])
     run_million_instance_test(1_000_000)
     evaluate_mutants()
-    run_staged_td4_cgroup_testbed(50)
-
+    run_synthetic_assumption_monitor_check(50)

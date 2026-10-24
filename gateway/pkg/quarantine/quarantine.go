@@ -40,13 +40,15 @@ type HandleReleaseVerifier interface {
 type Pool struct {
 	mu               sync.Mutex
 	entries          map[string]Entry // taskID → entry
-	capacity         int              // qmax
+	reservations     map[string]string
+	capacity         int // qmax
 	emergencyReserve int
 	verifier         HandleReleaseVerifier
 
 	// Per-pool quarantine tracking (BR-F09).
-	perPool           map[string]int // pool name → quarantine count
-	nonEmergencyCount int
+	perPool                   map[string]int // pool name → quarantine count
+	nonEmergencyCount         int
+	nonEmergencyReservedCount int
 
 	// Metrics
 	totalAdded    int64
@@ -91,6 +93,7 @@ func NewPoolWithVerifier(capacity, emergencyReserve int, verifier HandleReleaseV
 func newPool(capacity, emergencyReserve int) *Pool {
 	return &Pool{
 		entries:          make(map[string]Entry),
+		reservations:     make(map[string]string),
 		capacity:         capacity,
 		emergencyReserve: emergencyReserve,
 		perPool:          make(map[string]int),
@@ -112,19 +115,27 @@ func (p *Pool) Add(entry Entry) error {
 
 	if existing, exists := p.entries[entry.TaskID]; exists {
 		if entriesEqual(existing, entry) {
+			p.releaseReservationLocked(entry.TaskID)
 			return nil
 		}
 		return fmt.Errorf("task %s already exists in quarantine with conflicting entry", entry.TaskID)
 	}
 
-	entry.QuarantinedAt = time.Now().UTC()
-	if !p.canAddLocked(entry.Pool) {
+	reservedPool, reserved := p.reservations[entry.TaskID]
+	if reserved && reservedPool != entry.Pool {
+		return fmt.Errorf("task %s reserved quarantine capacity for pool %s, not %s", entry.TaskID, reservedPool, entry.Pool)
+	}
+	if !reserved && !p.canAddLocked(entry.Pool) {
 		p.totalRejected++
 		return fmt.Errorf("quarantine capacity unavailable for pool %s (%d/%d total, %d/%d non-emergency): cannot quarantine task %s",
-			entry.Pool, len(p.entries), p.capacity, p.nonEmergencyCount,
+			entry.Pool, p.occupiedLocked(), p.capacity, p.nonEmergencyCount+p.nonEmergencyReservedCount,
 			p.capacity-p.emergencyReserve, entry.TaskID)
 	}
 
+	if reserved {
+		p.releaseReservationLocked(entry.TaskID)
+	}
+	entry.QuarantinedAt = time.Now().UTC()
 	p.entries[entry.TaskID] = entry
 	p.perPool[entry.Pool]++
 	if entry.Pool != "emergency" {
@@ -133,6 +144,58 @@ func (p *Pool) Add(entry Entry) error {
 	p.totalAdded++
 
 	return nil
+}
+
+// ReserveSlot guarantees quarantine capacity for a task before it is admitted.
+// The reservation is transferred to Add or released when the task completes.
+func (p *Pool) ReserveSlot(taskID, pool string) error {
+	if taskID == "" || pool == "" {
+		return fmt.Errorf("quarantine reservation task ID and pool are required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry, exists := p.entries[taskID]; exists {
+		if entry.Pool == pool {
+			return nil
+		}
+		return fmt.Errorf("task %s is already quarantined in pool %s", taskID, entry.Pool)
+	}
+	if reservedPool, exists := p.reservations[taskID]; exists {
+		if reservedPool == pool {
+			return nil
+		}
+		return fmt.Errorf("task %s already reserved quarantine capacity for pool %s", taskID, reservedPool)
+	}
+	if !p.canAddLocked(pool) {
+		p.totalRejected++
+		return fmt.Errorf("quarantine capacity unavailable for pool %s (%d/%d total, %d/%d non-emergency)",
+			pool, p.occupiedLocked(), p.capacity, p.nonEmergencyCount+p.nonEmergencyReservedCount,
+			p.capacity-p.emergencyReserve)
+	}
+	p.reservations[taskID] = pool
+	if pool != "emergency" {
+		p.nonEmergencyReservedCount++
+	}
+	return nil
+}
+
+// ReleaseReservation relinquishes quarantine capacity held for a task that did
+// not need quarantine. It is safe to call after a reservation was transferred.
+func (p *Pool) ReleaseReservation(taskID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.releaseReservationLocked(taskID)
+}
+
+func (p *Pool) releaseReservationLocked(taskID string) {
+	pool, exists := p.reservations[taskID]
+	if !exists {
+		return
+	}
+	delete(p.reservations, taskID)
+	if pool != "emergency" {
+		p.nonEmergencyReservedCount--
+	}
 }
 
 // VerifyHandleRelease authenticates evidence without changing quarantine
@@ -261,7 +324,7 @@ func (p *Pool) Capacity() int {
 func (p *Pool) IsFull() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.entries) >= p.capacity
+	return p.occupiedLocked() >= p.capacity
 }
 
 // CanAdd reports whether an entry from the given execution pool currently has
@@ -273,13 +336,17 @@ func (p *Pool) CanAdd(pool string) bool {
 }
 
 func (p *Pool) canAddLocked(pool string) bool {
-	if len(p.entries) >= p.capacity {
+	if p.occupiedLocked() >= p.capacity {
 		return false
 	}
 	if pool == "emergency" {
 		return true
 	}
-	return p.nonEmergencyCount < p.capacity-p.emergencyReserve
+	return p.nonEmergencyCount+p.nonEmergencyReservedCount < p.capacity-p.emergencyReserve
+}
+
+func (p *Pool) occupiedLocked() int {
+	return len(p.entries) + len(p.reservations)
 }
 
 // PoolCount returns quarantine usage for a specific execution pool.
@@ -348,14 +415,16 @@ func entriesEqual(a, b Entry) bool {
 
 // Stats returns quarantine statistics.
 type Stats struct {
-	Count             int            `json:"count"`
-	Capacity          int            `json:"capacity"`
-	EmergencyReserve  int            `json:"emergency_reserve"`
-	NonEmergencyCount int            `json:"non_emergency_count"`
-	TotalAdded        int64          `json:"total_added"`
-	TotalReleased     int64          `json:"total_released"`
-	TotalRejected     int64          `json:"total_rejected"`
-	PerPool           map[string]int `json:"per_pool"`
+	Count                     int            `json:"count"`
+	ReservedCount             int            `json:"reserved_count"`
+	Capacity                  int            `json:"capacity"`
+	EmergencyReserve          int            `json:"emergency_reserve"`
+	NonEmergencyCount         int            `json:"non_emergency_count"`
+	NonEmergencyReservedCount int            `json:"non_emergency_reserved_count"`
+	TotalAdded                int64          `json:"total_added"`
+	TotalReleased             int64          `json:"total_released"`
+	TotalRejected             int64          `json:"total_rejected"`
+	PerPool                   map[string]int `json:"per_pool"`
 }
 
 func (p *Pool) Stats() Stats {
@@ -368,13 +437,15 @@ func (p *Pool) Stats() Stats {
 	}
 
 	return Stats{
-		Count:             len(p.entries),
-		Capacity:          p.capacity,
-		EmergencyReserve:  p.emergencyReserve,
-		NonEmergencyCount: p.nonEmergencyCount,
-		TotalAdded:        p.totalAdded,
-		TotalReleased:     p.totalReleased,
-		TotalRejected:     p.totalRejected,
-		PerPool:           perPool,
+		Count:                     len(p.entries),
+		ReservedCount:             len(p.reservations),
+		Capacity:                  p.capacity,
+		EmergencyReserve:          p.emergencyReserve,
+		NonEmergencyCount:         p.nonEmergencyCount,
+		NonEmergencyReservedCount: p.nonEmergencyReservedCount,
+		TotalAdded:                p.totalAdded,
+		TotalReleased:             p.totalReleased,
+		TotalRejected:             p.totalRejected,
+		PerPool:                   perPool,
 	}
 }

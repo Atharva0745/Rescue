@@ -4,6 +4,9 @@
 **Status:** Proposed architecture; implementation and validation are
 pending.
 
+> This document describes the target architecture, not current completion
+> status. See [`phase.md`](phase.md) for verified work and remaining gates.
+
 ## 1. Architectural Goal
 
 RESCUE-4 investigates containment of work that continues after its lease
@@ -269,13 +272,12 @@ protocol passes.
 
 ## 12. Threats to Validity & Baseline Fidelity Scope
 
-The baseline admission policy D is relabeled strictly as **"D (DRACO-inspired)"** under Gate G0-C2 because the full source code from the original DRACO authors is not publicly released. Per our architectural traceability table, our implementation reproduces DRACO's core datastore-aware selective-dropping mechanism: tracking partition-level latency and selectively shedding requests targeting degraded/hot datastore partitions while maintaining unconstrained throughput for healthy cold partitions. 
+The baseline admission policy D is labeled **"DRACO-inspired"** because the implementation is simplified and has not been independently verified against the original paper. The current model tracks per-partition latency samples and sheds requests above a configured threshold; this mechanism check does not establish fidelity to the original algorithm.
 
 However, several production components from the original paper are deliberately omitted or simplified:
 1. **Kernel-level eBPF Acceleration:** Omitted in favor of user-space gateway-level queue dispatch.
 2. **Distributed Partition Consensus:** Omitted under Assumption A6 (single gateway authority for queue scheduling).
 3. **Cross-Rack Tenant Work Stealing:** Omitted under Assumption A3 (strict FIFO queue discipline).
-4. **Adaptive Sliding Thresholds:** Simplified to static/windowed latency thresholding with sensitivity verified across [50ms, 200ms].
+4. **Adaptive Sliding Thresholds:** Not implemented; the threshold is static.
 
-Consequently, claims in this study read strictly as *"outperforms a DRACO-inspired policy"*, never as an absolute claim against the full proprietary DRACO runtime.
-
+The previous hard-coded threshold-sensitivity outputs were removed because they were not experiment results. The repaired registered simulation did not support its joint claim. No performance superiority claim against DRACO or a DRACO-inspired policy is established.

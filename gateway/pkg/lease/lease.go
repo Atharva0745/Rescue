@@ -3,6 +3,7 @@ package lease
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,7 @@ type Service struct {
 	mu     sync.Mutex
 	leases map[string]*Lease
 	fences map[string]FenceVersion
+	nextID uint64
 }
 
 func NewService() *Service {
@@ -56,7 +58,24 @@ func (s *Service) ensureFence(scope string) FenceVersion {
 
 // Begin creates a new lease in the ACTIVE state and advances the scope fence in
 // the same transaction before the lease is usable.
-func (s *Service) Begin(taskID, sourceID, scope, pool string, handles []string, expiresAt time.Time) *Lease {
+func (s *Service) Begin(taskID, sourceID, scope, pool string, handles []string, expiresAt time.Time) (*Lease, error) {
+	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(sourceID) == "" || strings.TrimSpace(scope) == "" {
+		return nil, fmt.Errorf("task ID, source ID, and lease scope are required")
+	}
+	seen := make(map[string]struct{}, len(handles))
+	for _, handle := range handles {
+		if strings.TrimSpace(handle) == "" {
+			return nil, fmt.Errorf("lease handle ID must not be empty")
+		}
+		if _, exists := seen[handle]; exists {
+			return nil, fmt.Errorf("duplicate lease handle %s", handle)
+		}
+		seen[handle] = struct{}{}
+	}
+	if len(handles) == 0 {
+		return nil, fmt.Errorf("lease manifest must contain at least one handle")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -64,9 +83,10 @@ func (s *Service) Begin(taskID, sourceID, scope, pool string, handles []string, 
 	v.Inc++
 	v.Epoch = 0
 	s.fences[scope] = v
+	s.nextID++
 
 	lease := &Lease{
-		ID:        fmt.Sprintf("lease-%s-%d", scope, time.Now().UnixNano()),
+		ID:        fmt.Sprintf("lease-%d", s.nextID),
 		TaskID:    taskID,
 		SourceID:  sourceID,
 		Scope:     scope,
@@ -80,7 +100,7 @@ func (s *Service) Begin(taskID, sourceID, scope, pool string, handles []string, 
 		Confirmed: make(map[string]bool),
 	}
 	s.leases[lease.ID] = lease
-	return lease
+	return cloneLease(lease), nil
 }
 
 // ConfirmHandle records independent confirmation that a handle has been released.
@@ -91,6 +111,9 @@ func (s *Service) ConfirmHandle(leaseID, handleID string) error {
 	l, ok := s.leases[leaseID]
 	if !ok {
 		return fmt.Errorf("lease %s not found", leaseID)
+	}
+	if l.State != "ACTIVE" {
+		return fmt.Errorf("lease %s is not active", leaseID)
 	}
 	for _, h := range l.Handles {
 		if h == handleID {
@@ -132,14 +155,17 @@ func (s *Service) Release(leaseID string) error {
 	if !ok {
 		return fmt.Errorf("lease %s not found", leaseID)
 	}
-	if !s.AllHandlesConfirmedLocked(l) {
+	if l.State == "RELEASED" {
+		return nil
+	}
+	if !s.allHandlesConfirmedLocked(l) {
 		return fmt.Errorf("lease %s still has unconfirmed handles", leaseID)
 	}
 	l.State = "RELEASED"
 	return nil
 }
 
-func (s *Service) AllHandlesConfirmedLocked(l *Lease) bool {
+func (s *Service) allHandlesConfirmedLocked(l *Lease) bool {
 	for _, h := range l.Handles {
 		if !l.Confirmed[h] {
 			return false
@@ -154,26 +180,23 @@ func (s *Service) Snapshot() []Lease {
 	defer s.mu.Unlock()
 	leases := make([]Lease, 0, len(s.leases))
 	for _, l := range s.leases {
-		copyHandles := append([]string(nil), l.Handles...)
-		confirmed := make(map[string]bool, len(l.Confirmed))
-		for k, v := range l.Confirmed {
-			confirmed[k] = v
-		}
-		leases = append(leases, Lease{
-			ID:        l.ID,
-			TaskID:    l.TaskID,
-			SourceID:  l.SourceID,
-			Scope:     l.Scope,
-			Pool:      l.Pool,
-			State:     l.State,
-			Epoch:     l.Epoch,
-			Fence:     l.Fence,
-			Handles:   copyHandles,
-			CreatedAt: l.CreatedAt,
-			ExpiresAt: l.ExpiresAt,
-			Confirmed: confirmed,
-		})
+		leases = append(leases, *cloneLease(l))
 	}
-	sort.Slice(leases, func(i, j int) bool { return leases[i].CreatedAt.Before(leases[j].CreatedAt) })
+	sort.Slice(leases, func(i, j int) bool {
+		if leases[i].CreatedAt.Equal(leases[j].CreatedAt) {
+			return leases[i].ID < leases[j].ID
+		}
+		return leases[i].CreatedAt.Before(leases[j].CreatedAt)
+	})
 	return leases
+}
+
+func cloneLease(l *Lease) *Lease {
+	copyLease := *l
+	copyLease.Handles = append([]string(nil), l.Handles...)
+	copyLease.Confirmed = make(map[string]bool, len(l.Confirmed))
+	for handle, confirmed := range l.Confirmed {
+		copyLease.Confirmed[handle] = confirmed
+	}
+	return &copyLease
 }

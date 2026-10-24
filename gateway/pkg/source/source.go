@@ -119,7 +119,7 @@ func (r *Registry) CheckAdmission(sourceID string, requested int) error {
 			cap = r.defaultCaps[scope]
 		}
 		used := r.usage[scope][key]
-		if used+requested > cap {
+		if requested > cap-used {
 			return fmt.Errorf("source %s exceeds %s cap: %d+%d > %d", sourceID, scope, used, requested, cap)
 		}
 	}
@@ -145,7 +145,7 @@ func (r *Registry) Reserve(sourceID string, requested int) error {
 			cap = r.defaultCaps[scope]
 		}
 		used := r.usage[scope][key]
-		if used+requested > cap {
+		if requested > cap-used {
 			return fmt.Errorf("source %s exceeds %s cap: %d+%d > %d", sourceID, scope, used, requested, cap)
 		}
 	}
@@ -243,20 +243,29 @@ func (r *Registry) SetPoolPolicy(policy *pool.Policy) {
 func (r *Registry) ChoosePool(sourceID string, preferred string) string {
 	r.mu.RLock()
 	state, ok := r.sources[sourceID]
+	var tier Tier
+	var probation bool
+	var sourcePool string
+	policy := r.poolPolicy
+	if ok {
+		tier = state.Tier
+		probation = state.Probation
+		sourcePool = state.Pool
+	}
 	r.mu.RUnlock()
 	if !ok {
 		return preferred
 	}
-	if r.poolPolicy != nil {
-		return r.poolPolicy.ChoosePool(string(state.Tier), preferred)
+	if policy != nil {
+		return policy.ChoosePool(string(tier), preferred)
 	}
-	if state.Probation {
+	if probation {
 		return "sacrificial"
 	}
 	if preferred != "" {
 		return preferred
 	}
-	return state.Pool
+	return sourcePool
 }
 
 // IsProbation reports whether a source is still confined to the sacrificial pool.

@@ -1,8 +1,9 @@
 # RESCUE-4 --- Experiment Evaluation Process
 
 **Source:** RESCUE-4 Technical Specification v1.5\
-**Status:** Evaluation protocol draft. No experiments, tests, or
-validation gates are reported as completed.\
+**Status:** Evaluation criteria and methods; this document is not an execution
+ledger. Current completion status and evidence are maintained only in
+[`phase.md`](phase.md).\
 **Purpose:** Define how RESCUE-4 experiments are evaluated, how evidence
 is accepted, and how conclusions are selected without changing the
 registered criteria after results are observed.

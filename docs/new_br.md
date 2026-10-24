@@ -9,6 +9,10 @@ accompanying deep-research report.\
 production emergency-service deployment plan. Numeric limits and pass
 thresholds remain placeholders until measured and pre-registered.
 
+> This is the target requirements baseline, not an implementation-status
+> report. Current completion evidence and remaining phases are maintained in
+> [`phase.md`](phase.md).
+
 ## 1. Executive Summary
 
 RESCUE investigates whether an emergency-report gateway can preserve
