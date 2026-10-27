@@ -20,6 +20,7 @@ import (
 	"github.com/rescue-gateway/gateway/pkg/source"
 	"github.com/rescue-gateway/gateway/pkg/task"
 	"github.com/rescue-gateway/gateway/pkg/worker"
+	"github.com/rescue-gateway/gateway/pkg/worker/cell"
 )
 
 // ErrNoWorkerSlots indicates that none of the queued tasks' pools can run work.
@@ -28,24 +29,28 @@ var ErrNoWorkerSlots = errors.New("no free worker slots")
 // Controller is a compact orchestration layer that wires together the main
 // architecture components: intake, admission, queueing, execution, and quarantine.
 type Controller struct {
-	mu            sync.Mutex
-	dispatchMu    sync.Mutex
-	IntakeLog     *intake.IntakeLog
-	Source        *source.Registry
-	LeaseService  *lease.Service
-	Queue         *queue.Queue
-	Quarantine    *quarantine.Pool
-	Metrics       *metrics.Collector
-	Outbox        *effect.Outbox
-	Auditor       *audit.ReverseAuditor
-	Pools         map[string]*worker.Pool
-	tasks         map[string]*task.Task
-	pending       map[string]workRequest
-	taskPools     map[string]string
-	workerHandles map[string]string
-	released      map[string]bool
-	nextHandleID  uint64
-	blockedFront  uint64
+	mu                       sync.Mutex
+	dispatchMu               sync.Mutex
+	IntakeLog                *intake.IntakeLog
+	Source                   *source.Registry
+	LeaseService             *lease.Service
+	Queue                    *queue.Queue
+	Quarantine               *quarantine.Pool
+	Metrics                  *metrics.Collector
+	Outbox                   *effect.Outbox
+	Auditor                  *audit.ReverseAuditor
+	Pools                    map[string]*worker.Pool
+	tasks                    map[string]*task.Task
+	pending                  map[string]workRequest
+	taskPools                map[string]string
+	workerHandles            map[string]string
+	released                 map[string]bool
+	workerBudget             int
+	registeredWorkerCapacity int
+	nextHandleID             uint64
+	blockedFront             uint64
+	cellManager              *cell.Manager
+	processCells             map[string]*cell.Cell
 }
 
 type workRequest struct {
@@ -54,11 +59,14 @@ type workRequest struct {
 	deadline        time.Time
 	requiredHandles []string
 	work            worker.TaskFunc
+	command         *cell.CommandSpec
 }
 
 // WorkRequest describes work admitted through the executable controller path.
 // RequiredHandles represent resources acquired for the task that need separate
 // confirmation before the task's accounting charge can be released.
+// Exactly one of Work or Command must be set. Work is for local tests and
+// benchmarks; Command runs inside a Linux cgroup-v2 process cell.
 type WorkRequest struct {
 	TaskID                 string
 	SourceID               string
@@ -71,10 +79,26 @@ type WorkRequest struct {
 	RequiredHandles        []string
 	HandleManifestComplete bool
 	Work                   worker.TaskFunc
+	Command                *cell.CommandSpec
 }
 
+// NewController creates the goroutine-backed local test/benchmark controller.
+// Use NewControllerWithExecutionCells for command-backed cgroup-v2 execution.
 func NewController(capacity int, maxPerSource int, qmax int) *Controller {
 	return newController(capacity, maxPerSource, qmax, quarantine.NewPool(qmax))
+}
+
+// NewControllerWithExecutionCells enables command-backed work in Linux
+// cgroup-v2 cells. Closure-backed work remains available for tests and local
+// benchmarks through NewController.
+func NewControllerWithExecutionCells(capacity, maxPerSource, qmax int, manager *cell.Manager) (*Controller, error) {
+	if manager == nil {
+		return nil, fmt.Errorf("process-cell manager must not be nil")
+	}
+	controller := NewController(capacity, maxPerSource, qmax)
+	controller.cellManager = manager
+	controller.processCells = make(map[string]*cell.Cell)
+	return controller, nil
 }
 
 // NewControllerWithEmergencyQuarantineReserve configures the minimum emergency
@@ -95,6 +119,9 @@ func NewControllerWithHandleReleaseVerifier(capacity, maxPerSource, qmax, emerge
 }
 
 func newController(capacity, maxPerSource, qmax int, qpool *quarantine.Pool) *Controller {
+	if capacity < 1 {
+		capacity = 1
+	}
 	reg := source.NewRegistry(nil)
 	policy := pool.NewPolicy(capacity, 1)
 	policy.RegisterPool("sacrificial", capacity/2)
@@ -116,6 +143,8 @@ func newController(capacity, maxPerSource, qmax int, qpool *quarantine.Pool) *Co
 		taskPools:     make(map[string]string),
 		workerHandles: make(map[string]string),
 		released:      make(map[string]bool),
+		workerBudget:  capacity,
+		processCells:  make(map[string]*cell.Cell),
 	}
 }
 
@@ -132,7 +161,11 @@ func (c *Controller) RegisterPool(name string, capacity int) error {
 	if _, exists := c.Pools[name]; exists {
 		return fmt.Errorf("pool %s is already registered", name)
 	}
+	if capacity > c.workerBudget-c.registeredWorkerCapacity {
+		return fmt.Errorf("registering pool %s with capacity %d exceeds aggregate worker budget: registered=%d budget=%d", name, capacity, c.registeredWorkerCapacity, c.workerBudget)
+	}
 	c.Pools[name] = worker.NewPool(name, capacity, capacity*2)
+	c.registeredWorkerCapacity += capacity
 	return nil
 }
 
@@ -143,8 +176,23 @@ func (c *Controller) EnqueueWork(req WorkRequest) error {
 	if req.TaskID == "" || req.SourceID == "" {
 		return fmt.Errorf("task ID and source ID are required")
 	}
-	if req.Work == nil {
-		return fmt.Errorf("task %s has no worker function", req.TaskID)
+	if (req.Work == nil) == (req.Command == nil) {
+		return fmt.Errorf("task %s must specify exactly one of Work or Command", req.TaskID)
+	}
+	if req.Work != nil && c.cellManager != nil {
+		return fmt.Errorf("task %s uses a Go closure, but this controller requires command-backed process-cell work", req.TaskID)
+	}
+	if req.Command != nil && c.cellManager == nil {
+		return fmt.Errorf("task %s specifies a process command but controller has no cgroup-v2 cell manager", req.TaskID)
+	}
+	if req.Command != nil && req.Command.Path == "" {
+		return fmt.Errorf("task %s process command path is required", req.TaskID)
+	}
+	if req.Command != nil {
+		command := *req.Command
+		command.Args = append([]string(nil), command.Args...)
+		command.Env = append([]string(nil), command.Env...)
+		req.Command = &command
 	}
 	if !req.HandleManifestComplete {
 		return fmt.Errorf("task %s handle manifest must be declared complete before admission", req.TaskID)
@@ -228,6 +276,7 @@ func (c *Controller) EnqueueWork(req WorkRequest) error {
 		deadline:        req.Deadline,
 		requiredHandles: append([]string(nil), req.RequiredHandles...),
 		work:            req.Work,
+		command:         req.Command,
 	}
 	c.taskPools[req.TaskID] = req.Pool
 	return nil
@@ -307,19 +356,6 @@ func (c *Controller) DispatchNext() (string, error) {
 	}
 	candidate := candidates[selected]
 	item, req, t, pool := candidate.item, candidate.req, candidate.task, candidate.pool
-	removed, ok := c.Queue.RemoveForDispatch(item.TaskID)
-	if !ok || removed.TaskID != item.TaskID {
-		return "", fmt.Errorf("queued task %s was removed before dispatch", item.TaskID)
-	}
-	c.mu.Lock()
-	current, exists := c.pending[item.TaskID]
-	if !exists || current.pool != req.pool || c.tasks[item.TaskID] != t {
-		c.mu.Unlock()
-		return "", fmt.Errorf("queued task %s changed before dispatch", item.TaskID)
-	}
-	delete(c.pending, item.TaskID)
-	c.mu.Unlock()
-
 	workerHandle := fmt.Sprintf("%s-worker-%d", item.TaskID, atomic.AddUint64(&c.nextHandleID, 1))
 	handles := append([]string(nil), req.requiredHandles...)
 	collision := true
@@ -344,8 +380,56 @@ func (c *Controller) DispatchNext() (string, error) {
 		}
 		seen[handle] = struct{}{}
 	}
+	if err := c.Auditor.RegisterOwners(handles, item.TaskID); err != nil {
+		return "", fmt.Errorf("reserve task %s resource handles: %w", item.TaskID, err)
+	}
+
+	removed, ok := c.Queue.RemoveForDispatch(item.TaskID)
+	if !ok || removed.TaskID != item.TaskID {
+		for _, handle := range handles {
+			if err := c.Auditor.MarkReleased(handle, item.TaskID); err != nil {
+				return "", fmt.Errorf("queued task %s was removed before dispatch; release handle %s: %w", item.TaskID, handle, err)
+			}
+		}
+		return "", fmt.Errorf("queued task %s was removed before dispatch", item.TaskID)
+	}
+	c.mu.Lock()
+	current, exists := c.pending[item.TaskID]
+	if !exists || current.pool != req.pool || c.tasks[item.TaskID] != t {
+		c.mu.Unlock()
+		for _, handle := range handles {
+			if err := c.Auditor.MarkReleased(handle, item.TaskID); err != nil {
+				return "", fmt.Errorf("queued task %s changed before dispatch; release handle %s: %w", item.TaskID, handle, err)
+			}
+		}
+		return "", fmt.Errorf("queued task %s changed before dispatch", item.TaskID)
+	}
+	delete(c.pending, item.TaskID)
+	c.mu.Unlock()
 
 	l := c.LeaseService.Begin(item.TaskID, t.SourceID, req.scope, req.pool, handles, req.deadline)
+	if err := c.Outbox.AdvanceFence(req.scope, l.Fence.Inc); err != nil {
+		t.ConfigureLease(l.ID, req.pool, l.Fence.Inc)
+		for _, handle := range handles {
+			if confirmErr := c.LeaseService.ConfirmHandle(l.ID, handle); confirmErr != nil {
+				return "", fmt.Errorf("advance effect fence for task %s: %v; confirm unstarted handle %s: %w", item.TaskID, err, handle, confirmErr)
+			}
+			if markErr := c.Auditor.MarkReleased(handle, item.TaskID); markErr != nil {
+				return "", fmt.Errorf("advance effect fence for task %s: %v; release reserved handle %s: %w", item.TaskID, err, handle, markErr)
+			}
+		}
+		if releaseErr := c.LeaseService.Release(l.ID); releaseErr != nil {
+			return "", fmt.Errorf("advance effect fence for task %s: %v; release unstarted lease: %w", item.TaskID, err, releaseErr)
+		}
+		if transitionErr := t.TransitionTo(task.StateExpired, "effect fence synchronization failed before worker start"); transitionErr != nil {
+			return "", fmt.Errorf("advance effect fence for task %s: %v; expire task: %w", item.TaskID, err, transitionErr)
+		}
+		if transitionErr := t.TransitionTo(task.StateReleased, "worker and resource handles were never started"); transitionErr != nil {
+			return "", fmt.Errorf("advance effect fence for task %s: %v; release task: %w", item.TaskID, err, transitionErr)
+		}
+		c.Source.Release(t.SourceID, 1)
+		return "", fmt.Errorf("advance effect fence for task %s: %w", item.TaskID, err)
+	}
 	t.ConfigureLease(l.ID, req.pool, l.Fence.Inc)
 	for _, handle := range req.requiredHandles {
 		t.AddHandle(task.HandleExternalResource, handle)
@@ -365,6 +449,9 @@ func (c *Controller) DispatchNext() (string, error) {
 	c.mu.Unlock()
 	work := func(workCtx context.Context) error {
 		defer cancel()
+		if req.command != nil {
+			return c.runProcessCell(workCtx, item.TaskID, *req.command, t, l.ID, req.pool)
+		}
 		return req.work(workCtx)
 	}
 	if _, err := pool.SubmitWithHandle(item.TaskID, workerHandle, ctx, work); err != nil {
@@ -654,6 +741,102 @@ func (c *Controller) CancelTask(taskID string) error {
 	return pool.Cancel(taskID)
 }
 
+// StopProcessCell retries the termination ladder for a command-backed task.
+// If the task is still active, it first requests cooperative cancellation.
+func (c *Controller) StopProcessCell(taskID string, ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("process-cell stop context must not be nil")
+	}
+	c.mu.Lock()
+	cellProcess := c.processCells[taskID]
+	t := c.tasks[taskID]
+	c.mu.Unlock()
+	if cellProcess == nil {
+		return fmt.Errorf("task %s has no active process cell", taskID)
+	}
+	if t == nil {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+	switch t.GetState() {
+	case task.StateActive:
+		if err := c.CancelTask(taskID); err != nil {
+			return fmt.Errorf("request task cancellation before process-cell stop: %w", err)
+		}
+	case task.StateCancelling, task.StateExpired, task.StateQuarantined:
+	default:
+		return fmt.Errorf("task %s in state %s cannot stop a process cell", taskID, t.GetState())
+	}
+	return cellProcess.Stop(ctx)
+}
+
+func (c *Controller) runProcessCell(ctx context.Context, taskID string, spec cell.CommandSpec, t *task.Task, leaseID, poolName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	manager := c.cellManager
+	c.mu.Unlock()
+	if manager == nil {
+		return fmt.Errorf("process-cell manager is unavailable")
+	}
+	processCell, err := manager.Start(taskID, spec)
+	if err != nil {
+		return fmt.Errorf("start process cell for task %s: %w", taskID, err)
+	}
+	c.mu.Lock()
+	c.processCells[taskID] = processCell
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.processCells[taskID] == processCell {
+			delete(c.processCells, taskID)
+		}
+		c.mu.Unlock()
+	}()
+
+	_, waitErr := processCell.Wait(ctx)
+	if waitErr == nil {
+		return processCell.Close()
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	stopErr := processCell.Stop(stopCtx)
+	cancel()
+	if stopErr != nil {
+		quarantineErr := c.quarantineProcessCell(t, leaseID, poolName, stopErr)
+		_, waitErr = processCell.Wait(context.Background())
+		if waitErr != nil {
+			return errors.Join(
+				fmt.Errorf("stop process cell: %w", stopErr),
+				quarantineErr,
+				fmt.Errorf("wait for verified process-cell exit: %w", waitErr),
+			)
+		}
+		return errors.Join(
+			fmt.Errorf("process cell required external cleanup after stop failure: %w", stopErr),
+			quarantineErr,
+			processCell.Close(),
+		)
+	}
+	if _, verifyErr := processCell.Wait(context.Background()); verifyErr != nil {
+		return fmt.Errorf("verify process cell after termination: %w", verifyErr)
+	}
+	return errors.Join(waitErr, processCell.Close())
+}
+
+func (c *Controller) quarantineProcessCell(t *task.Task, leaseID, poolName string, cause error) error {
+	state := t.GetState()
+	if state == task.StateActive || state == task.StateCancelling {
+		if err := t.TransitionTo(task.StateExpired, "process-cell termination or verification failed"); err != nil {
+			state = t.GetState()
+			if state != task.StateExpired && state != task.StateQuarantined {
+				return fmt.Errorf("expire task after process-cell failure: %w", err)
+			}
+		}
+	}
+	return c.finishOrQuarantine(t, leaseID, fmt.Sprintf("process cell remains unconfirmed: %v", cause), poolName)
+}
+
 func (c *Controller) finishOrQuarantine(t *task.Task, leaseID, reason string, poolNames ...string) error {
 	if t.AllHandlesConfirmed() {
 		return c.releaseTask(t)
@@ -705,6 +888,11 @@ func (c *Controller) releaseTask(t *task.Task) error {
 	}
 	if err := c.LeaseService.Release(t.LeaseIdentity()); err != nil {
 		return err
+	}
+	for _, handle := range t.Snapshot().Handles {
+		if err := c.Auditor.MarkReleased(handle.HandleID, t.ID); err != nil {
+			return fmt.Errorf("record release of task %s handle %s: %w", t.ID, handle.HandleID, err)
+		}
 	}
 	if c.Quarantine.Contains(t.ID) {
 		if err := c.Quarantine.Release(t.ID); err != nil {

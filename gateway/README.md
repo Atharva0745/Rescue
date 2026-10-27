@@ -153,10 +153,85 @@ is acknowledged, so reconciliation should be idempotent by `CompletionID`.
 A handler that ignores its context therefore keeps its worker slot and source
 charge held until it actually stops.
 
+The bounded FIFO queue is the admission wait: requests may wait there while
+workers are busy, and a full queue rejects immediately. A successful
+`EnqueueWork` acknowledges queue admission, not task completion. The configured
+queue capacity and per-source limit are authoritative; no unbounded wait is
+performed.
+
+## Controller process-cell execution
+
+For command-backed work, create a delegated cgroup-v2 manager and construct the
+controller with `NewControllerWithExecutionCells`. Set `WorkRequest.Command`
+instead of `Work`; the command then runs in its own verified process cell, and
+its worker-slot charge is reconciled only after the cgroup is empty. On a
+termination or verification failure, the controller keeps the task charged in
+quarantine. An operator can retry the termination ladder with
+`StopProcessCell(taskID, ctx)`.
+
+The controller's `NewController` constructor and `WorkRequest.Work` closure path
+remain for local tests and the timer-based benchmark. They do not provide
+process isolation and must not be used to claim cancellation-resistant work is
+contained. Command-backed execution requires Linux cgroup v2; it is not
+available on native Windows. WSL2 is suitable for development integration
+tests, while confirmatory measurements require a controlled Linux testbed.
+
 Consumers using `worker.Pool` directly must call `AcknowledgeCompletion` only
 after reconciling the event. `WaitDrain` and `Shutdown` include unacknowledged
 completion events and will not report a drained pool until they are acknowledged.
 There is no completion dispatcher goroutine to block or outlive shutdown.
+
+## Architecture work implemented in this prototype
+
+The Go controller remains the single RESCUE reservation-policy path; the
+historical A′/D and B1/B2/ZAC policies remain in the Python simulator and are
+not gateway arms. Registered worker-pool capacities are now checked against the
+controller's aggregate worker budget. The standalone pool policy also enforces
+per-pool caps and protects the emergency floor from non-emergency reservations.
+
+Fenced effect commits must use `effect.Outbox.MarkSent` with the claimant and
+fence version. It validates the active claim and current scope fence atomically
+and counts commits rejected for stale fences. `CanSend` is only a preflight
+check; it is not a substitute for the commit-time validation. Controller
+dispatch advances the effect-sink fence to the newly issued lease fence before
+starting work and fails closed if those counters have diverged.
+
+The in-gateway reverse auditor now reports observations whose resource ID is
+unknown to its owner ledger, whose observed owner is empty, or whose owner
+does not match, including resources still observed after the ledger records
+their release. The controller registers handles at dispatch and records their
+release in that ledger. It still audits only observations passed to it; it is
+not the independent operating-system or database enumerator required by the
+evaluation harness.
+
+## Linux cgroup-v2 process-cell tests
+
+`pkg/worker/cell` provides a Linux-only process execution-cell backend. It
+creates cgroups only under a caller-supplied delegated cgroup-v2 directory,
+places the child in its cgroup before user code executes, applies cooperative
+SIGINT and SIGTERM grace periods, uses `cgroup.kill` as the final escalation,
+and confirms both `cgroup.events` (`populated 0`) and an empty `cgroup.procs`
+before reporting release. If atomic `CLONE_INTO_CGROUP` placement is denied,
+the backend uses a ptrace exec-stop to move the process before resuming it.
+Lifecycle events are available from `Cell.Events()`.
+
+On WSL2, run tests from a systemd user scope with delegation. First verify
+`/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service` exists
+and is writable, then run:
+
+```bash
+cd /mnt/c/Users/hp/OneDrive/Desktop/Rescue-main/Rescue-main/gateway
+systemd-run --user --scope --property=Delegate=yes \
+  env RESCUE_CGROUP_ROOT="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service" \
+  go test ./pkg/worker/cell -v
+```
+
+The execution-cell package currently accepts an executable `CommandSpec`; it
+does not convert the controller's existing Go closures into child processes,
+and is not yet selected by `Controller`. The goroutine backend remains the
+controller's execution path. The process cell currently verifies containment
+and termination but does not configure CPU or memory limits. Those are explicit
+integration and calibration tasks, not properties established by these tests.
 
 ## Prototype boundaries
 
@@ -165,12 +240,21 @@ There is no completion dispatcher goroutine to block or outlive shutdown.
 - Worker completion events are also in-memory. The acknowledgement protocol
   prevents capacity from being returned before reconciliation during a live
   process, but it does not provide crash recovery or durable completion records.
-- Resource handles are supplied by the caller; this module does not create or
-  inspect Linux cgroups, PostgreSQL backends, locks, or provider calls.
-- Reverse audit currently compares supplied observations; it does not enumerate
-  operating-system or database resources.
+- The controller's resource handles are supplied by the caller. The separate
+  process-cell package creates and inspects Linux cgroups; neither package
+  creates or inspects PostgreSQL backends, locks, or provider calls.
+- Reverse audit compares supplied observations; it does not enumerate
+  operating-system or database resources and is not independent of the
+  controller.
 - The effect outbox is not wired to a real provider or a persistent shared
   fence store.
+- The default controller constructor still uses goroutines for its
+  closure-backed test/benchmark path. Command-backed controller execution is
+  integrated with the Linux process-cell package and retains the worker-slot
+  charge until cgroup emptiness is verified.
+- Process cells currently enforce containment and termination but do not
+  configure CPU or memory limits. Process-backed workload packaging and
+  resource-limit calibration remain required.
 - The simulator, B1/B2 baselines, attacker search, equal-budget enforcement,
   seed split, and confirmatory statistical analysis remain unimplemented.
 - Numeric limits are placeholders, and this prototype must not be connected to
