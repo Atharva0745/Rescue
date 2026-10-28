@@ -77,24 +77,27 @@ func (p *Policy) CanUse(poolName string, requested int) bool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if poolName == "" {
+	poolCapacity, registered := p.pools[poolName]
+	if poolName == "" || !registered {
 		return false
 	}
-	used := 0
+	used, poolUsed, nonEmergencyUsed := 0, 0, 0
 	for _, value := range p.usage {
 		used += value
 	}
-	if used+requested > p.capacity {
+	for name, value := range p.usage {
+		if name == poolName {
+			poolUsed = value
+		}
+		if name != "emergency" {
+			nonEmergencyUsed += value
+		}
+	}
+	if used+requested > p.capacity || poolUsed+requested > poolCapacity {
 		return false
 	}
-	if poolName == "emergency" {
-		reserved := 0
-		for name, value := range p.usage {
-			if name == "emergency" {
-				reserved += value
-			}
-		}
-		return reserved+requested <= p.emergencyFloor || used+requested <= p.capacity
+	if poolName != "emergency" && nonEmergencyUsed+requested > p.capacity-p.emergencyFloor {
+		return false
 	}
 	return true
 }
@@ -109,12 +112,27 @@ func (p *Policy) Reserve(poolName string, amount int) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	used := 0
+	poolCapacity, registered := p.pools[poolName]
+	if !registered {
+		return fmt.Errorf("pool %s is not registered", poolName)
+	}
+	used, poolUsed, nonEmergencyUsed := 0, p.usage[poolName], 0
 	for _, value := range p.usage {
 		used += value
 	}
+	for name, value := range p.usage {
+		if name != "emergency" {
+			nonEmergencyUsed += value
+		}
+	}
+	if poolUsed+amount > poolCapacity {
+		return fmt.Errorf("pool %s capacity exceeded: used=%d requested=%d capacity=%d", poolName, poolUsed, amount, poolCapacity)
+	}
 	if used+amount > p.capacity {
 		return fmt.Errorf("aggregate pool capacity exceeded: used=%d requested=%d total=%d", used, amount, p.capacity)
+	}
+	if poolName != "emergency" && nonEmergencyUsed+amount > p.capacity-p.emergencyFloor {
+		return fmt.Errorf("emergency floor would be consumed: non_emergency=%d requested=%d total=%d emergency_floor=%d", nonEmergencyUsed, amount, p.capacity, p.emergencyFloor)
 	}
 	p.usage[poolName] += amount
 	return nil

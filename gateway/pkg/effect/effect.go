@@ -31,9 +31,10 @@ type Effect struct {
 
 // Outbox stores effects attached to a scope and enforces fence-version semantics.
 type Outbox struct {
-	mu      sync.Mutex
-	effects map[string]*Effect
-	fences  map[string]uint64
+	mu                  sync.Mutex
+	effects             map[string]*Effect
+	fences              map[string]uint64
+	staleWritesRejected uint64
 }
 
 func NewOutbox() *Outbox {
@@ -64,13 +65,35 @@ func (o *Outbox) BumpFence(scope string) uint64 {
 	for _, e := range o.effects {
 		if e.Scope == scope && e.Status == StatusClaimed {
 			e.Status = StatusFailed
-			e.Fence = v
-		}
-		if e.Scope == scope {
-			e.Fence = v
 		}
 	}
 	return v
+}
+
+// AdvanceFence synchronizes a scope to a lease-service fence version. It
+// rejects regressions and invalidates active claims when the fence advances.
+func (o *Outbox) AdvanceFence(scope string, fence uint64) error {
+	if scope == "" {
+		return fmt.Errorf("effect scope must not be empty")
+	}
+	if fence == 0 {
+		return fmt.Errorf("fence version must be greater than zero")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if fence < o.fences[scope] {
+		return fmt.Errorf("fence regression for scope %s: current=%d requested=%d", scope, o.fences[scope], fence)
+	}
+	if fence == o.fences[scope] {
+		return nil
+	}
+	o.fences[scope] = fence
+	for _, e := range o.effects {
+		if e.Scope == scope && e.Status == StatusClaimed {
+			e.Status = StatusFailed
+		}
+	}
+	return nil
 }
 
 // Add registers a new effect in the outbox in PENDING state.
@@ -98,10 +121,14 @@ func (o *Outbox) Claim(id, claimant string, ttl time.Duration) error {
 	if e.Status == StatusClaimed && e.ClaimedUntil.After(time.Now()) {
 		return fmt.Errorf("effect %s already claimed", id)
 	}
+	if e.Status == StatusSent {
+		return fmt.Errorf("effect %s is already sent", id)
+	}
 	e.Status = StatusClaimed
 	e.ClaimedBy = claimant
 	e.ClaimedAt = time.Now()
 	e.ClaimedUntil = time.Now().Add(ttl)
+	e.Fence = o.fences[e.Scope]
 	return nil
 }
 
@@ -113,22 +140,35 @@ func (o *Outbox) CanSend(id string, fence uint64) bool {
 	if !ok || e.Status != StatusClaimed {
 		return false
 	}
-	if e.Fence != fence {
+	if e.Fence != fence || o.fences[e.Scope] != fence {
 		return false
 	}
 	return time.Now().Before(e.ClaimedUntil)
 }
 
-// MarkSent marks the effect as completed and final.
-func (o *Outbox) MarkSent(id string) {
+// MarkSent atomically validates the active claim and fence before accepting an
+// effect write. External sinks should use this method at commit time rather
+// than relying on a prior CanSend check.
+func (o *Outbox) MarkSent(id, claimant string, fence uint64) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	e, ok := o.effects[id]
 	if !ok {
-		return
+		return fmt.Errorf("effect %s not found", id)
+	}
+	if fence != o.fences[e.Scope] || fence != e.Fence {
+		o.staleWritesRejected++
+		return fmt.Errorf("effect %s rejected stale fence %d; current fence is %d", id, fence, o.fences[e.Scope])
+	}
+	if e.Status != StatusClaimed || e.ClaimedBy != claimant {
+		return fmt.Errorf("effect %s is not actively claimed by %s", id, claimant)
+	}
+	if !time.Now().Before(e.ClaimedUntil) {
+		return fmt.Errorf("effect %s claim has expired", id)
 	}
 	e.Status = StatusSent
 	e.SentAt = time.Now()
+	return nil
 }
 
 // MarkFailed marks a claim as failed.
@@ -140,6 +180,14 @@ func (o *Outbox) MarkFailed(id string) {
 		return
 	}
 	e.Status = StatusFailed
+}
+
+// StaleWritesRejected reports the number of effect commits rejected because
+// their fence version was no longer current.
+func (o *Outbox) StaleWritesRejected() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.staleWritesRejected
 }
 
 // Snapshot enumerates all known effects.

@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/rescue-gateway/gateway/pkg/audit"
 	"github.com/rescue-gateway/gateway/pkg/source"
 	"github.com/rescue-gateway/gateway/pkg/task"
+	"github.com/rescue-gateway/gateway/pkg/worker/cell"
 )
 
 type testHandleReleaseVerifier struct{}
@@ -57,6 +60,108 @@ func waitForState(t *testing.T, c *Controller, taskID string, want task.State) t
 	return task.Snapshot{}
 }
 
+func TestRegisterPoolEnforcesAggregateWorkerBudget(t *testing.T) {
+	c := NewController(3, 2, 3)
+	if err := c.RegisterPool("normal", 2); err != nil {
+		t.Fatalf("register first pool: %v", err)
+	}
+	if err := c.RegisterPool("sacrificial", 2); err == nil {
+		t.Fatal("registered worker capacity exceeded the aggregate budget")
+	}
+	if got := len(c.Pools); got != 1 {
+		t.Fatalf("failed pool registration changed controller state: pool count=%d", got)
+	}
+}
+
+func TestEnqueueRequiresOneConfiguredExecutionBackend(t *testing.T) {
+	c := newTestController(t)
+	base := WorkRequest{
+		TaskID:                 "execution-backend",
+		SourceID:               "execution-backend-source",
+		HandleManifestComplete: true,
+	}
+	if err := c.EnqueueWork(base); err == nil {
+		t.Fatal("request without an execution backend was accepted")
+	}
+	base.Work = func(context.Context) error { return nil }
+	base.Command = &cell.CommandSpec{Path: "/bin/true"}
+	if err := c.EnqueueWork(base); err == nil {
+		t.Fatal("request with two execution backends was accepted")
+	}
+	base.Work = nil
+	if err := c.EnqueueWork(base); err == nil {
+		t.Fatal("command request was accepted without a process-cell manager")
+	}
+}
+
+func TestDispatchAdvancesEffectFenceBeforeWorkStarts(t *testing.T) {
+	c := newTestController(t)
+	effect := c.RegisterEffect("fenced-effect", "fenced-scope", "payload")
+	if err := c.Outbox.Claim(effect.ID, "old-sender", time.Minute); err != nil {
+		t.Fatalf("claim effect before replacement lease: %v", err)
+	}
+	if !c.Outbox.CanSend(effect.ID, effect.Fence) {
+		t.Fatal("initial effect claim should be valid")
+	}
+
+	started := make(chan struct{})
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "replacement-task",
+		SourceID:               "replacement-source",
+		Scope:                  "fenced-scope",
+		HandleManifestComplete: true,
+		Work: func(context.Context) error {
+			close(started)
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("enqueue replacement work: %v", err)
+	}
+	if _, err := c.DispatchNext(); err != nil {
+		t.Fatalf("dispatch replacement work: %v", err)
+	}
+	<-started
+	if c.Outbox.CanSend(effect.ID, effect.Fence) {
+		t.Fatal("replacement lease did not invalidate the old effect fence")
+	}
+	if err := c.Outbox.MarkSent(effect.ID, "old-sender", effect.Fence); err == nil {
+		t.Fatal("stale effect write was accepted after replacement lease")
+	}
+}
+
+func TestDispatchFailsClosedWhenLeaseFenceWouldRegress(t *testing.T) {
+	c := newTestController(t)
+	for range 3 {
+		c.Outbox.BumpFence("diverged-scope")
+	}
+	var started atomic.Bool
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "diverged-fence-task",
+		SourceID:               "diverged-fence-source",
+		Scope:                  "diverged-scope",
+		HandleManifestComplete: true,
+		Work: func(context.Context) error {
+			started.Store(true)
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("enqueue work: %v", err)
+	}
+	if _, err := c.DispatchNext(); err == nil {
+		t.Fatal("dispatch should fail when the lease fence would regress the effect fence")
+	}
+	snapshot, ok := c.TaskSnapshot("diverged-fence-task")
+	if !ok || snapshot.State != task.StateReleased {
+		t.Fatalf("unstarted task state = %v, want RELEASED", snapshot.State)
+	}
+	if started.Load() {
+		t.Fatal("work started after effect fence synchronization failed")
+	}
+	if got := c.Source.Get("diverged-fence-source").Usage["global"]; got != 0 {
+		t.Fatalf("source charge leaked after pre-start rejection: %d", got)
+	}
+}
+
 func TestWorkLifecycleReleasesAfterWorkerConfirmation(t *testing.T) {
 	c := newTestController(t)
 	err := c.EnqueueWork(WorkRequest{
@@ -84,6 +189,20 @@ func TestWorkLifecycleReleasesAfterWorkerConfirmation(t *testing.T) {
 	}
 	if c.Source.Get("new-source").Usage["global"] != 0 {
 		t.Fatal("source charge was not released after worker confirmation")
+	}
+	for _, handle := range snapshot.Handles {
+		if handle.Kind != task.HandleWorkerSlot {
+			continue
+		}
+		orphans := c.RecordRuntimeAudit([]audit.Resource{{
+			ID:      handle.HandleID,
+			Kind:    "worker_slot",
+			OwnerID: snapshot.ID,
+		}})
+		if len(orphans) != 1 || orphans[0].Reason != "resource is still observed after ledger release" {
+			t.Fatalf("auditor did not detect a resource still live after ledger release: %+v", orphans)
+		}
+		break
 	}
 }
 
@@ -592,5 +711,50 @@ func TestFullQuarantinePausesProbationAndRetainsExistingCharges(t *testing.T) {
 	}
 	if err := c.ConfirmHandle("task-6c", "db-6c", releaseEvidence("task-6c", "db-6c")); err != nil {
 		t.Fatalf("confirm second external handle: %v", err)
+	}
+}
+
+func TestTimedReleaseBaselineReleasesPrematurely(t *testing.T) {
+	c := newTestController(t)
+	c.SetTimedReleaseMode(true)
+
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	defer close(finish)
+
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "task-baseline-1",
+		SourceID:               "source-baseline-1",
+		Pool:                   "normal",
+		Deadline:               time.Now().Add(30 * time.Millisecond),
+		HandleManifestComplete: true,
+		Work: func(context.Context) error {
+			close(started)
+			<-finish
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("enqueue work: %v", err)
+	}
+	if _, err := c.DispatchNext(); err != nil {
+		t.Fatalf("dispatch work: %v", err)
+	}
+	<-started
+	time.Sleep(50 * time.Millisecond)
+
+	if err := c.ReconcileCompletions(); err != nil {
+		t.Fatalf("reconcile timed-release task: %v", err)
+	}
+
+	// In baseline Timed Release mode, capacity is released prematurely while work is still running:
+	if got := c.Pools["sacrificial"].ActiveCount(); got != 0 {
+		t.Fatalf("baseline timed release failed to release slot prematurely: active=%d, want 0", got)
+	}
+	if got := c.Source.Get("source-baseline-1").Usage["global"]; got != 0 {
+		t.Fatalf("baseline timed release failed to release source charge: usage=%d, want 0", got)
+	}
+	snapshot, ok := c.TaskSnapshot("task-baseline-1")
+	if !ok || snapshot.State != task.StateReleased {
+		t.Fatalf("task state under timed release = %v, want RELEASED", snapshot.State)
 	}
 }
