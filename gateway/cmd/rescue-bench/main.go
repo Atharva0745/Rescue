@@ -34,6 +34,10 @@ type options struct {
 	firstContact        bool
 	mixedPools          bool
 	saturateSacrificial bool
+	zombieFraction      float64
+	zombieHangFactor    float64
+	zombieAllTraffic    bool
+	baselineMode        bool
 }
 
 type requestObservation struct {
@@ -64,6 +68,9 @@ type runManifest struct {
 	MixedPoolWorkload     bool                      `json:"mixed_pool_workload"`
 	SacrificialSaturated  bool                      `json:"sacrificial_pool_saturated_during_measurement"`
 	SaturationTasks       int                       `json:"saturation_tasks"`
+	ZombieFraction        float64                   `json:"zombie_fraction"`
+	ZombieHangFactor      float64                   `json:"zombie_hang_factor"`
+	BaselineMode          bool                      `json:"baseline_timed_release_mode"`
 	ProtectedCapacity     int                       `json:"protected_worker_capacity"`
 	WorkDuration          time.Duration             `json:"work_duration_ns"`
 	Deadline              time.Duration             `json:"deadline_ns"`
@@ -121,6 +128,10 @@ func run() error {
 	flag.BoolVar(&opts.firstContact, "first-contact", false, "give each offered request a new source, routing it to sacrificial")
 	flag.BoolVar(&opts.mixedPools, "mixed-pools", false, "alternate first-contact sacrificial requests with established normal-pool requests")
 	flag.BoolVar(&opts.saturateSacrificial, "saturate-sacrificial", false, "occupy every sacrificial worker for the full measurement window")
+	flag.Float64Var(&opts.zombieFraction, "zombie-fraction", 0, "fraction of attacker requests that resist cancellation and hang (0.0 to 1.0)")
+	flag.Float64Var(&opts.zombieHangFactor, "zombie-hang-factor", 3.0, "multiplier of deadline that zombie tasks continue running past deadline")
+	flag.BoolVar(&opts.zombieAllTraffic, "zombie-all-traffic", false, "apply zombie cancellation-resistance to legitimate tasks as well")
+	flag.BoolVar(&opts.baselineMode, "baseline-timed-release", false, "run in Timed Release baseline mode (immediately releases capacity on timeout)")
 	flag.Parse()
 
 	if opts.duration <= 0 || opts.rate <= 0 || opts.workers <= 0 || opts.work <= 0 || opts.deadline <= 0 {
@@ -135,6 +146,9 @@ func run() error {
 
 	const sourceCapacity = 100000
 	gateway := controller.NewController(sourceCapacity, sourceCapacity, opts.workers*4)
+	if opts.baselineMode {
+		gateway.SetTimedReleaseMode(true)
+	}
 	gateway.Source = source.NewRegistry(map[string]int{
 		"group":  sourceCapacity,
 		"asn":    sourceCapacity,
@@ -243,6 +257,16 @@ func run() error {
 		if isFirstContact {
 			sourceID = fmt.Sprintf("first-contact-%08d", sequence)
 		}
+		isZombie := false
+		if opts.zombieFraction > 0 {
+			if opts.zombieAllTraffic || !isLegitimate {
+				isZombie = rng.Float64() < opts.zombieFraction
+			}
+		}
+		if isZombie {
+			// A cancellation-resistant zombie task attempts to run longer than the deadline
+			workDuration = opts.deadline + time.Duration(float64(opts.deadline)*opts.zombieHangFactor)
+		}
 		observation := &requestObservation{
 			id:           fmt.Sprintf("request-%08d", sequence),
 			sourceID:     sourceID,
@@ -272,7 +296,17 @@ func run() error {
 				select {
 				case <-timer.C:
 				case <-ctx.Done():
-					workErr = ctx.Err()
+					if isZombie {
+						hangMultiplier := opts.zombieHangFactor
+						if hangMultiplier <= 0 {
+							hangMultiplier = 2.0
+						}
+						hangDuration := time.Duration(float64(opts.deadline) * hangMultiplier)
+						time.Sleep(hangDuration)
+						workErr = ctx.Err()
+					} else {
+						workErr = ctx.Err()
+					}
 				}
 				observation.mu.Lock()
 				observation.completed = time.Now()
@@ -310,7 +344,7 @@ func run() error {
 
 	admitted, rejected, handlerReturns, successfulCompletions := 0, 0, 0, 0
 	for _, observation := range requests {
-		record, handlerReturned, err := makeRecord(gateway, observation)
+		record, handlerReturned, err := makeRecord(gateway, observation, opts.baselineMode)
 		if err != nil {
 			return err
 		}
@@ -353,9 +387,15 @@ func run() error {
 	if err := os.WriteFile(summaryPath, summaryBytes, 0644); err != nil {
 		return fmt.Errorf("write summary: %w", err)
 	}
+	runType := "observed_go_controller_benchmark"
+	interpretation := "One measured RESCUE Go-controller arm only; not a baseline comparison, simulator result, or PostgreSQL testbed result."
+	if opts.baselineMode {
+		runType = "observed_baseline_timed_release_benchmark"
+		interpretation = "Measured Timed-Release (TR) baseline arm; releases capacity upon timeout without waiting for handle confirmation."
+	}
 	manifest := runManifest{
-		RunType:               "observed_go_controller_benchmark",
-		Interpretation:        "One measured RESCUE Go-controller arm only; not a baseline comparison, simulator result, or PostgreSQL testbed result.",
+		RunType:               runType,
+		Interpretation:        interpretation,
 		Seed:                  opts.seed,
 		ArrivalRatePerSecond:  opts.rate,
 		MeasurementWindow:     window,
@@ -365,6 +405,9 @@ func run() error {
 		MixedPoolWorkload:     opts.mixedPools,
 		SacrificialSaturated:  opts.saturateSacrificial,
 		SaturationTasks:       saturationTasks,
+		ZombieFraction:        opts.zombieFraction,
+		ZombieHangFactor:      opts.zombieHangFactor,
+		BaselineMode:          opts.baselineMode,
 		ProtectedCapacity:     gateway.Pools["normal"].Capacity(),
 		WorkDuration:          opts.work,
 		Deadline:              opts.deadline,
@@ -537,7 +580,7 @@ func dispatchQueued(gateway *controller.Controller, errs chan<- error) {
 	for gateway.Queue.Len() > 0 {
 		_, err := gateway.DispatchNext()
 		if err != nil {
-			if errors.Is(err, controller.ErrNoWorkerSlots) {
+			if errors.Is(err, controller.ErrNoWorkerSlots) || errors.Is(err, controller.ErrNoQueuedWork) {
 				return
 			}
 			select {
@@ -562,7 +605,7 @@ func allTerminal(gateway *controller.Controller, requests []*requestObservation)
 	return true
 }
 
-func makeRecord(gateway *controller.Controller, request *requestObservation) (metrics.RequestRecord, bool, error) {
+func makeRecord(gateway *controller.Controller, request *requestObservation, baselineMode bool) (metrics.RequestRecord, bool, error) {
 	record := metrics.RequestRecord{
 		RequestID:                 request.id,
 		TaskID:                    request.id,
@@ -574,7 +617,7 @@ func makeRecord(gateway *controller.Controller, request *requestObservation) (me
 		ArrivedAt:                 request.arrivedAt,
 		Deadline:                  request.deadline,
 		WorkDuration:              request.workDuration,
-		CapacityReleasedOnTimeout: false,
+		CapacityReleasedOnTimeout: baselineMode,
 	}
 	if !request.admitted {
 		record.Outcome = "rejected"

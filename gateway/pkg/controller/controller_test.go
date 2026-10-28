@@ -713,3 +713,48 @@ func TestFullQuarantinePausesProbationAndRetainsExistingCharges(t *testing.T) {
 		t.Fatalf("confirm second external handle: %v", err)
 	}
 }
+
+func TestTimedReleaseBaselineReleasesPrematurely(t *testing.T) {
+	c := newTestController(t)
+	c.SetTimedReleaseMode(true)
+
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	defer close(finish)
+
+	if err := c.EnqueueWork(WorkRequest{
+		TaskID:                 "task-baseline-1",
+		SourceID:               "source-baseline-1",
+		Pool:                   "normal",
+		Deadline:               time.Now().Add(30 * time.Millisecond),
+		HandleManifestComplete: true,
+		Work: func(context.Context) error {
+			close(started)
+			<-finish
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("enqueue work: %v", err)
+	}
+	if _, err := c.DispatchNext(); err != nil {
+		t.Fatalf("dispatch work: %v", err)
+	}
+	<-started
+	time.Sleep(50 * time.Millisecond)
+
+	if err := c.ReconcileCompletions(); err != nil {
+		t.Fatalf("reconcile timed-release task: %v", err)
+	}
+
+	// In baseline Timed Release mode, capacity is released prematurely while work is still running:
+	if got := c.Pools["sacrificial"].ActiveCount(); got != 0 {
+		t.Fatalf("baseline timed release failed to release slot prematurely: active=%d, want 0", got)
+	}
+	if got := c.Source.Get("source-baseline-1").Usage["global"]; got != 0 {
+		t.Fatalf("baseline timed release failed to release source charge: usage=%d, want 0", got)
+	}
+	snapshot, ok := c.TaskSnapshot("task-baseline-1")
+	if !ok || snapshot.State != task.StateReleased {
+		t.Fatalf("task state under timed release = %v, want RELEASED", snapshot.State)
+	}
+}

@@ -189,7 +189,25 @@ func (p *Pool) runTask(taskID, handleID string, ctx context.Context, fn TaskFunc
 		TimedOut:     timedOut,
 	}
 	p.mu.Unlock()
-	at.cancel()
+	if at.cancel != nil {
+		at.cancel()
+	}
+}
+
+// ForceRelease simulates baseline timed release by releasing the capacity slot
+// immediately without waiting for the task to finish running.
+func (p *Pool) ForceRelease(handleID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	taskID, exists := p.handleOwners[handleID]
+	if !exists {
+		return fmt.Errorf("pool %s: handle %s not found for force release", p.poolName, handleID)
+	}
+	delete(p.activeTasks, taskID)
+	delete(p.handleOwners, handleID)
+	p.acknowledgedHandles[handleID] = taskID
+	atomic.AddInt32(&p.activeCount, -1)
+	return nil
 }
 
 func completionID(poolName, handleID string) string {

@@ -26,6 +26,9 @@ import (
 // ErrNoWorkerSlots indicates that none of the queued tasks' pools can run work.
 var ErrNoWorkerSlots = errors.New("no free worker slots")
 
+// ErrNoQueuedWork indicates that the queue is empty or all queued items have elapsed.
+var ErrNoQueuedWork = errors.New("no queued work")
+
 // Controller is a compact orchestration layer that wires together the main
 // architecture components: intake, admission, queueing, execution, and quarantine.
 type Controller struct {
@@ -51,6 +54,23 @@ type Controller struct {
 	blockedFront             uint64
 	cellManager              *cell.Manager
 	processCells             map[string]*cell.Cell
+	timedReleaseMode         bool
+}
+
+// SetTimedReleaseMode configures whether the controller uses standard Timed Release
+// (baseline behavior where capacity is released on timeout without waiting for handle confirmation)
+// or Owner-Confirmed Release (RESCUE behavior).
+func (c *Controller) SetTimedReleaseMode(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.timedReleaseMode = enabled
+}
+
+// TimedReleaseMode returns true if the controller is operating in baseline timed-release mode.
+func (c *Controller) TimedReleaseMode() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.timedReleaseMode
 }
 
 type workRequest struct {
@@ -293,7 +313,7 @@ func (c *Controller) DispatchNext() (string, error) {
 	}
 	items := c.Queue.Snapshot()
 	if len(items) == 0 {
-		return "", fmt.Errorf("no queued work")
+		return "", ErrNoQueuedWork
 	}
 
 	type dispatchCandidate struct {
@@ -576,14 +596,32 @@ func (c *Controller) expireOverdueTasks() error {
 	for _, t := range c.tasks {
 		tasks = append(tasks, t)
 	}
+	timedRelease := c.timedReleaseMode
 	c.mu.Unlock()
 
 	now := time.Now()
 	for _, t := range tasks {
 		snapshot := t.Snapshot()
-		if snapshot.State == task.StateActive && !snapshot.Deadline.IsZero() && !now.Before(snapshot.Deadline) {
+		if (snapshot.State == task.StateActive || snapshot.State == task.StateCancelling) && !snapshot.Deadline.IsZero() && !now.Before(snapshot.Deadline) {
 			if err := t.TransitionTo(task.StateExpired, "task deadline elapsed; worker release still unconfirmed"); err != nil && t.GetState() == task.StateActive {
 				return err
+			}
+			if timedRelease {
+				// BASELINE / TIMED RELEASE:
+				// Immediately release capacity on timeout without waiting for handle confirmation.
+				c.mu.Lock()
+				workerHandle := c.workerHandles[t.ID]
+				poolName := c.taskPools[t.ID]
+				p := c.Pools[poolName]
+				c.mu.Unlock()
+				if p != nil && workerHandle != "" {
+					_ = p.ForceRelease(workerHandle)
+				}
+				for _, h := range t.Snapshot().Handles {
+					_ = t.ConfirmHandle(h.HandleID)
+					_ = c.LeaseService.ConfirmHandle(t.LeaseIdentity(), h.HandleID)
+				}
+				_ = c.releaseTask(t)
 			}
 		}
 	}
@@ -623,7 +661,11 @@ func (c *Controller) reconcileCompletion(event worker.CompletionEvent) error {
 	t := c.tasks[event.TaskID]
 	workerHandle := c.workerHandles[event.TaskID]
 	poolName := c.taskPools[event.TaskID]
+	isReleased := c.released[event.TaskID]
 	c.mu.Unlock()
+	if isReleased {
+		return nil
+	}
 	if t == nil || workerHandle == "" {
 		return fmt.Errorf("completion for unknown or undispatched task %s", event.TaskID)
 	}
