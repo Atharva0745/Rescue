@@ -720,7 +720,6 @@ func TestTimedReleaseBaselineReleasesPrematurely(t *testing.T) {
 
 	started := make(chan struct{})
 	finish := make(chan struct{})
-	defer close(finish)
 
 	if err := c.EnqueueWork(WorkRequest{
 		TaskID:                 "task-baseline-1",
@@ -756,5 +755,30 @@ func TestTimedReleaseBaselineReleasesPrematurely(t *testing.T) {
 	snapshot, ok := c.TaskSnapshot("task-baseline-1")
 	if !ok || snapshot.State != task.StateReleased {
 		t.Fatalf("task state under timed release = %v, want RELEASED", snapshot.State)
+	}
+
+	pool := c.Pools["sacrificial"]
+	close(finish)
+	deadline := time.Now().Add(time.Second)
+	for len(pool.PendingCompletions()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(pool.PendingCompletions()) == 0 {
+		t.Fatal("timed-release handler did not publish its late completion")
+	}
+	if err := c.ReconcileCompletions(); err != nil {
+		t.Fatalf("reconcile late timed-release completion: %v", err)
+	}
+	if got := pool.ActiveCount(); got != 0 {
+		t.Fatalf("late completion changed timed-release active count to %d, want 0", got)
+	}
+	if got := pool.FreeSlots(); got != pool.Capacity() {
+		t.Fatalf("free slots after late completion = %d, want capacity %d", got, pool.Capacity())
+	}
+	c.mu.Lock()
+	_, hasWorkerHandle := c.workerHandles["task-baseline-1"]
+	c.mu.Unlock()
+	if hasWorkerHandle {
+		t.Fatal("late timed-release completion left a stale worker handle")
 	}
 }

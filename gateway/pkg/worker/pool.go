@@ -245,9 +245,14 @@ func (p *Pool) AcknowledgeCompletion(taskID, handleID string) error {
 	if event.TaskID != taskID {
 		return fmt.Errorf("pool %s: completion handle %s belongs to task %s, not %s", p.poolName, handleID, event.TaskID, taskID)
 	}
+	// ForceRelease may have acknowledged the handle while its task was still running.
+	alreadyReleased := p.acknowledgedHandles[handleID] == taskID
 	delete(p.pendingCompletions, handleID)
 	delete(p.handleOwners, handleID)
 	p.acknowledgedHandles[handleID] = taskID
+	if alreadyReleased {
+		return nil
+	}
 	atomic.AddInt32(&p.activeCount, -1)
 	return nil
 }

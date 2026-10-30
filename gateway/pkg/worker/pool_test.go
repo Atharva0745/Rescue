@@ -70,6 +70,47 @@ func TestSubmitEnforcesCapacityAndReportsCompletion(t *testing.T) {
 	p.Close()
 }
 
+func TestForceReleasedCompletionDoesNotDecrementCapacityTwice(t *testing.T) {
+	p := NewPool("test", 1, 1)
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	handle, err := p.SubmitWithHandle("task-1", "worker-1", context.Background(), func(context.Context) error {
+		close(started)
+		<-finish
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("submit task: %v", err)
+	}
+	<-started
+
+	if err := p.ForceRelease(handle); err != nil {
+		t.Fatalf("force release task: %v", err)
+	}
+	if p.ActiveCount() != 0 || p.FreeSlots() != p.Capacity() {
+		t.Fatalf("capacity after force release = active %d, free %d; want 0 active and %d free",
+			p.ActiveCount(), p.FreeSlots(), p.Capacity())
+	}
+
+	close(finish)
+	event := receiveCompletion(t, p)
+	if event.TaskID != "task-1" || event.HandleID != handle {
+		t.Fatalf("late completion identity = (%q, %q), want (task-1, %q)", event.TaskID, event.HandleID, handle)
+	}
+	acknowledgeCompletion(t, p, event)
+	if p.ActiveCount() != 0 || p.FreeSlots() != p.Capacity() {
+		t.Fatalf("capacity after late completion = active %d, free %d; want 0 active and %d free",
+			p.ActiveCount(), p.FreeSlots(), p.Capacity())
+	}
+	if err := p.AcknowledgeCompletion(event.TaskID, event.HandleID); err != nil {
+		t.Fatalf("repeat completion acknowledgement: %v", err)
+	}
+	if p.ActiveCount() != 0 {
+		t.Fatalf("repeated acknowledgement changed active count to %d", p.ActiveCount())
+	}
+	p.Close()
+}
+
 func TestCancellationDoesNotReleaseSlotUntilHandlerReturns(t *testing.T) {
 	p := NewPool("test", 1, 1)
 	started := make(chan struct{})

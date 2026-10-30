@@ -662,10 +662,14 @@ func (c *Controller) reconcileCompletion(event worker.CompletionEvent) error {
 	workerHandle := c.workerHandles[event.TaskID]
 	poolName := c.taskPools[event.TaskID]
 	isReleased := c.released[event.TaskID]
-	c.mu.Unlock()
 	if isReleased {
+		if workerHandle != "" && workerHandle == event.HandleID {
+			delete(c.workerHandles, event.TaskID)
+		}
+		c.mu.Unlock()
 		return nil
 	}
+	c.mu.Unlock()
 	if t == nil || workerHandle == "" {
 		return fmt.Errorf("completion for unknown or undispatched task %s", event.TaskID)
 	}
