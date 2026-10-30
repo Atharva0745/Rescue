@@ -230,8 +230,9 @@ func run() error {
 		stopSnapshotsOnce.Do(func() { close(stopSnapshots) })
 		<-snapshotDone
 	}
+	snapshotErrors := make(chan error, 1)
 	go collectSnapshots(gateway, &actualRunning, &offeredCount, &admittedCount, &rejectedCount,
-		stopSnapshots, snapshotDone, &snapshotMu, &snapshots, collector)
+		stopSnapshots, snapshotDone, &snapshotMu, &snapshots, collector, snapshotErrors)
 	defer stopSnapshotCollection()
 
 	fmt.Printf("Running real Go controller workload: duration=%s rate=%.1f/s workers/pool=%d work=%s deadline=%s seed=%d first-contact=%t mixed-pools=%t sacrificial-saturated=%t\n",
@@ -252,6 +253,7 @@ func run() error {
 		isLegitimate := rng.Float64() < 0.8
 		workDuration := opts.work + time.Duration(rng.Int63n(int64(opts.work/2)+1))
 		arrivedAt := time.Now()
+		requestDeadline := arrivedAt.Add(opts.deadline)
 		sourceID := "benchmark-source"
 		isFirstContact := opts.firstContact || (opts.mixedPools && sequence%2 == 1)
 		if isFirstContact {
@@ -265,13 +267,14 @@ func run() error {
 		}
 		if isZombie {
 			// A cancellation-resistant zombie task attempts to run longer than the deadline
-			workDuration = opts.deadline + time.Duration(float64(opts.deadline)*opts.zombieHangFactor)
+			deadlineDuration := requestDeadline.Sub(arrivedAt)
+			workDuration = deadlineDuration + time.Duration(float64(deadlineDuration)*opts.zombieHangFactor)
 		}
 		observation := &requestObservation{
 			id:           fmt.Sprintf("request-%08d", sequence),
 			sourceID:     sourceID,
 			arrivedAt:    arrivedAt,
-			deadline:     arrivedAt.Add(opts.deadline),
+			deadline:     requestDeadline,
 			workDuration: workDuration,
 			legitimate:   isLegitimate,
 			firstContact: isFirstContact,
@@ -301,7 +304,8 @@ func run() error {
 						if hangMultiplier <= 0 {
 							hangMultiplier = 2.0
 						}
-						hangDuration := time.Duration(float64(opts.deadline) * hangMultiplier)
+						deadlineDuration := observation.deadline.Sub(observation.arrivedAt)
+						hangDuration := time.Duration(float64(deadlineDuration) * hangMultiplier)
 						time.Sleep(hangDuration)
 						workErr = ctx.Err()
 					} else {
@@ -330,6 +334,8 @@ func run() error {
 		select {
 		case err := <-dispatchErrors:
 			return err
+		case err := <-snapshotErrors:
+			return err
 		default:
 		}
 		if allTerminal(gateway, requests) {
@@ -341,6 +347,11 @@ func run() error {
 		return fmt.Errorf("workload did not drain before %s", drainDeadline.Format(time.RFC3339))
 	}
 	stopSnapshotCollection()
+	select {
+	case err := <-snapshotErrors:
+		return err
+	default:
+	}
 
 	admitted, rejected, handlerReturns, successfulCompletions := 0, 0, 0, 0
 	for _, observation := range requests {
@@ -493,7 +504,7 @@ func dispatchLoop(gateway *controller.Controller, stop <-chan struct{}, done cha
 
 func collectSnapshots(gateway *controller.Controller, actualRunning *atomic.Int64,
 	offered, admitted, rejected *atomic.Int64, stop <-chan struct{}, done chan<- struct{},
-	mu *sync.Mutex, snapshots *[]benchmarkSnapshot, collector *metrics.Collector) {
+	mu *sync.Mutex, snapshots *[]benchmarkSnapshot, collector *metrics.Collector, errorCh chan<- error) {
 	defer close(done)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -504,6 +515,14 @@ func collectSnapshots(gateway *controller.Controller, actualRunning *atomic.Int6
 		case now := <-ticker.C:
 			sacrificial := gateway.Pools["sacrificial"]
 			protected := gateway.Pools["normal"]
+			for poolName, pool := range gateway.Pools {
+				free := pool.FreeSlots()
+				if free > pool.Capacity() {
+					errorCh <- fmt.Errorf("worker pool %s reports %d free slots above capacity %d",
+						poolName, free, pool.Capacity())
+					return
+				}
+			}
 			active := sacrificial.ActiveCount() + protected.ActiveCount()
 			total := sacrificial.Capacity() + protected.Capacity()
 			recordedFree := sacrificial.FreeSlots() + protected.FreeSlots()
